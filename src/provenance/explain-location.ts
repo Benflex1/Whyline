@@ -5,6 +5,9 @@ import { discoverRepositoryContext, readTargetStatus } from "../git/repository-c
 import { inspectCommit } from "../git/inspect-commit.js";
 import { currentLocationSnapshot, resolveLocation, snapshotsEqual } from "../location/resolve-location.js";
 import { parseLocation } from "../location/parse-location.js";
+import type { AgentHistorySource } from "../agents/agent-history-source.js";
+import { correlateCodex } from "./correlate-codex.js";
+import { buildCorrelationTarget } from "./build-correlation-target.js";
 import type {
   GitProvenance,
   WhylineReport,
@@ -19,13 +22,14 @@ export interface AnalyzeLocationOptions {
   readonly currentDirectory?: string;
   readonly git?: GitRunner;
   readonly hooks?: AnalysisHooks;
+  readonly agentHistorySource?: AgentHistorySource;
+  readonly codexHome?: string;
 }
 
 function baseLimitations(): string[] {
   return [
     "This is Git textual attribution: last textual attribution according to baseline Git blame.",
     "Refactors or code movement may hide the semantic origin.",
-    "Codex correlation is intentionally deferred in this Git-only slice.",
   ];
 }
 
@@ -140,7 +144,24 @@ export async function analyzeLocation(
     }
   }
 
-  const report: WhylineReport = { repository, location, provenance };
+  let correlation: WhylineReport["correlation"];
+  if (provenance.state === "committed") {
+    const target = buildCorrelationTarget(repository, location, provenance);
+    if (target !== null) {
+      correlation = await correlateCodex({
+        target,
+        location,
+        repository,
+        git: runner,
+        ...(options.agentHistorySource === undefined ? {} : { agentHistorySource: options.agentHistorySource }),
+        ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
+      });
+    }
+  }
+
+  const report: WhylineReport = correlation === undefined
+    ? { repository, location, provenance }
+    : { repository, location, provenance, correlation };
   await options.hooks?.beforeFinalVerification?.(report);
   await verifyStableState(runner, report);
   return report;

@@ -27,7 +27,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 - For a committed line, reports the full blamed commit ID, original path and line where available, author/committer metadata, parents, subject, relevant changed paths, and the commit hunk associated with the target.
 - Handles renames represented by Git's blame and diff machinery.
 - Searches active and archived local Codex session stores, if enabled and readable.
-- Extracts a small set of structured Codex evidence: session identity and times, working directories, file reads, file writes/patches, Git commands and referenced revisions, test/verification commands, tool outcomes, and truncation/compaction warnings.
+- Extracts a small set of empirically supported Codex evidence: session identity and times, working directories, recorded command attempts, streamed terminal input, patch attempts and variant-specific patch results/change payloads, optional transcript Git revision metadata, tool-result linkage, and truncation/compaction warnings. It does not claim generic structured file reads or file writes.
 - Correlates sessions without requiring that the session itself created a commit. This covers the common workflow where an agent edits and a human commits later.
 - Renders a concise text report whose sections distinguish observed facts, deterministic derivations, and inferred correlation.
 - Exits successfully when Git provenance is available but no Codex history or reliable match exists.
@@ -153,11 +153,11 @@ Every user-visible claim has a `basis`:
 
 | Basis | Meaning | Examples |
 | --- | --- | --- |
-| `fact` | Directly observed in Git, the filesystem, or a transcript record | commit ID, commit subject, session cwd, a recorded tool call, exit code |
+| `fact` | Directly observed in Git, the filesystem, or a transcript record | commit ID, commit subject, session cwd, a recorded tool call, a tool-reported patch result |
 | `derived` | Deterministic transformation of facts | canonical repository identity, selected commit hunk, changed-path overlap, normalized patch fingerprint |
 | `inferred` | A causal or semantic conclusion supported by signals | a Codex session likely produced the commit |
 
-Transcript evidence is a fact about the transcript, not automatically a fact about the final repository. For example, `apply_patch` invocation is evidence that Codex attempted a write; a matching successful result is evidence the tool reported success; only current Git proves what the commit contains. Similarly, a recorded test command plus exit status may be reported as `recorded successful test`, not as a timeless guarantee that the repository still passes.
+Transcript evidence is a fact about the transcript, not automatically a fact about the final repository. For example, `apply_patch` invocation is evidence that Codex attempted a patch; a matching result is evidence the tool reported completion or failure; only current Git proves what the commit contains. The observed shell schemas do not provide a stable structured exit-status field, so command, test, build, and lint records are attempts only. A future schema with structured status may add a separate success fact.
 
 ### Data model
 
@@ -211,29 +211,64 @@ interface GitCommit {
 
 interface AgentSessionRef {
   adapterId: string;
-  sourcePath: string;
+  sourcePath: string;         // opaque read handle; filename is not identity
   sourceKind: "active" | "archived" | string;
 }
 
 interface AgentSessionSummary {
   ref: AgentSessionRef;
-  sessionId: string;
+  sessionId: string | null;    // null means this source is unusable, never a guessed ID
   startedAt?: string;
-  endedAt?: string;
+  observedThroughAt?: string;  // last valid record timestamp, not session termination
+  initialCwd?: string;
   workingDirectories: string[];
   adapterSchema?: string;
-  isTruncated: boolean;
-  parseWarnings: string[];
+  surface?: string;
+  originator?: string;
+  source?: string;
+  clientVersion?: string;
+  model?: string;
+  parentSessionId?: string;
+  forkedFromSessionId?: string;
+  transcriptGit?: {
+    branch?: string;
+    commitHash?: string;
+  };
+  isPartial: boolean;
+  diagnostics: AgentDiagnostic[];
 }
 
 type EvidenceKind =
-  | "file-read"
-  | "file-write"
-  | "patch"
-  | "command"
+  | "command-attempt"
+  | "stream-input"
+  | "patch-attempt"
+  | "patch-result"
   | "git-revision-reference"
-  | "test-run"
-  | "user-task";
+  | "mcp-operation";
+
+type AgentOperation =
+  | "command"
+  | "terminal-input"
+  | "patch"
+  | "mcp";
+
+interface AgentPatchChange {
+  path: string;
+  changeType: "update" | "add" | "delete" | "unknown";
+  payloadKind: "unified-diff" | "content";
+  payloadRecovered: boolean;
+  payloadFingerprint: string;
+  payloadTruncated: boolean;
+  addedLineFingerprints: string[];
+  lineCount: number;
+}
+
+interface AgentPatchEvidence {
+  callId: string;
+  reportedSuccess?: boolean;
+  status?: string;
+  changes: AgentPatchChange[];
+}
 
 interface AgentEvidence {
   id: string;
@@ -241,19 +276,47 @@ interface AgentEvidence {
   occurredAt?: string;
   cwd?: string;
   paths: string[];
-  command?: string;
-  exitCode?: number;
+  operation?: AgentOperation;
+  callId?: string;
+  resultRecorded?: boolean;
+  terminalSessionId?: string;
+  reportedSuccess?: boolean;
+  status?: string;
+  patch?: AgentPatchEvidence;
   commitIds: string[];
-  patchFingerprint?: string;
-  extraction: "structured" | "conservative-parse";
+  extraction: "structured";
   sourceRecord: number;
+}
+
+type AgentDiagnosticKind =
+  | "unknown-record"
+  | "compacted-history"
+  | "context-compaction"
+  | "thread-rollback"
+  | "turn-aborted"
+  | "partial-final-record"
+  | "corrupt-non-final-record"
+  | "unreadable-transcript"
+  | "changed-during-read"
+  | "missing-session-metadata"
+  | "conflicting-session-metadata"
+  | "unlinked-tool-result"
+  | "invalid-timestamp"
+  | "malformed-tool-arguments"
+  | "retention-limit"
+  | "unsupported-source";
+
+interface AgentDiagnostic {
+  kind: AgentDiagnosticKind;
+  record?: number;
+  detail?: string; // bounded and control-character-free; never raw transcript text
 }
 
 interface AgentEvidenceBundle {
   session: AgentSessionSummary;
   evidence: AgentEvidence[];
   unknownRecordCount: number;
-  limitations: string[];
+  diagnostics: AgentDiagnostic[];
 }
 
 interface CorrelationSignal {
@@ -281,6 +344,11 @@ interface CorrelationResult {
 }
 ```
 
+`sessionId` is populated only from the transcript's structured session metadata;
+a source without it is an unsupported/diagnostic result, never a filename-based
+session. A subagent transcript is a separate `AgentSessionSummary` and retains
+its observed parent/fork IDs rather than being flattened into the root session.
+
 Do not persist `lineDigest` as the identity of a line. Lines are not durable entities across edits. It is only useful during one analysis for exact comparisons.
 
 ## Correlation model
@@ -291,9 +359,14 @@ Scoring cannot repair an identity mistake. Apply these gates first:
 
 1. A session with a known, incompatible repository identity is excluded even if relative paths and timestamps match.
 2. Prefer a canonical worktree match. Treat any cwd belonging to a worktree returned by `git worktree list --porcelain -z` as belonging to the same repository, while retaining which worktree produced the evidence.
-3. If the recorded cwd no longer exists, an exact historical root string or transcript-recorded Git identity may keep the candidate eligible, but path basename alone never establishes repository identity.
+3. If the recorded cwd no longer exists, an exact historical root string or transcript-recorded commit reference may keep the candidate eligible as supporting evidence, but transcript cwd/branch/commit metadata never establishes durable repository identity or `commonGitDir`; path basename alone never establishes repository identity.
 4. A session with no usable repository signal may be listed as weak only when it contains the exact target commit ID. It cannot be selected automatically.
 5. Time is never an eligibility requirement. Rebases, squash merges, delayed commits, and amended commits make commit times unreliable causal boundaries.
+
+Transcript repository URLs are never retained or rendered. Git-side repository
+and worktree discovery remains authoritative for repository identity and
+`commonGitDir`; transcript cwd, optional branch, and optional commit hash are
+correlation evidence only.
 
 ### Signals and initial weights
 
@@ -305,11 +378,11 @@ Use an explainable additive score only to order candidates within confidence gat
 | Agent patch/post-image overlaps the relevant commit hunk | +8 | Compare normalized added-line fingerprints; require enough nontrivial content to avoid boilerplate matches |
 | Exact target worktree identity | +5 | Use canonical path plus Git worktree mapping |
 | Same common Git directory through another known worktree | +4 | Important for Codex-managed detached worktrees |
-| Recorded write to the blamed path | +4 | Resolve relative to the event cwd, not process cwd |
+| Recorded patch attempt or recovered patch change for the blamed path | +4 | Only supported patch variants supply structured change data; resolve paths relative to the session/event cwd |
 | Meaningful overlap with the commit's changed-file set | +1 to +3 | Based on overlap size; filenames alone are not decisive |
-| Recorded read of the target or nearby changed files | +1 | Supporting evidence only |
-| Successful Git commit command resolving to the target | +4 | Separate from textual SHA references; depends on reliable tool result linkage |
-| Successful relevant test/lint command | +1 | Explains verification, not authorship |
+| Recorded command attempt referencing the target or nearby changed files | +1 | Supporting evidence only; do not shell-parse command text |
+| Structured transcript Git commit metadata resolving to the target | +4 | Optional SHA evidence; it does not establish repository identity or a successful shell command |
+| Recorded relevant test/lint command attempt | +1 | Explains attempted verification only; observed schemas do not provide stable shell success status |
 | Temporal proximity | 0 to +2 | Bounded weak signal; use session interval versus author and committer times |
 | Explicit conflicting commit/repository evidence | -10 or exclusion | Prefer exclusion for known repository mismatch |
 | Same file but patch content contradicts target hunk | -5 | Protects against multiple sessions touching the same file |
@@ -320,7 +393,7 @@ Patch fingerprints should normalize line endings and insignificant diff metadata
 
 The report should never display `83% confidence`. The inputs are incomplete and correlated, so that number would imply calibration that does not exist.
 
-- **Strong:** exact repository identity plus at least one direct change anchor: target commit reference, successful target commit action, or distinctive hunk/post-image overlap. No material contradiction.
+- **Strong:** exact repository identity plus at least one direct change anchor: target commit reference or distinctive supported patch/post-image overlap. No material contradiction.
 - **Plausible:** exact repository identity plus at least two independent supporting signals, at least one involving a write or changed-set overlap. Time plus same filename is not enough.
 - **Weak:** everything else that survives eligibility.
 
@@ -334,7 +407,7 @@ This rule deliberately sacrifices recall. A false causal story is worse than a G
 - **Squash merge:** several sessions may overlap one final commit. The result remains ambiguous unless one has distinctive hunk overlap and the others do not. v0 does not divide a commit among sessions line by line beyond the queried hunk.
 - **Human edits after agent work:** reduced or contradictory hunk overlap lowers confidence. Whyline can say the session is plausible evidence without claiming the final line is agent-authored.
 - **Multiple sessions on the same code:** direct hunk overlap and commit references outrank time. Multiple strong candidates remain visible as ambiguity.
-- **Session without a commit:** it can still match through repository, writes, patch overlap, and changed-set overlap.
+- **Session without a commit:** it can still match through repository, supported patch evidence, and changed-set overlap.
 - **Missing/truncated history:** report adapter coverage limitations; absence of evidence is not evidence of human authorship.
 
 ## Codex preflight questions
@@ -452,6 +525,7 @@ The adapter must not:
 - decide that a session caused a commit;
 - assume all paths are relative to the current Whyline invocation;
 - silently discard unknown record types;
+- use `history.jsonl` as provenance evidence; it is an incomplete prompt-bearing index, not a transcript;
 - depend on Codex naming in the domain or correlation modules.
 
 Adding another agent later should mean implementing `AgentHistorySource` and its private parser, not changing Git analysis or correlation semantics. Avoid a dynamic plugin system until a second adapter proves what must vary.
@@ -480,7 +554,7 @@ This is the only future-facing seam justified now. Do not introduce AST interfac
 - Two repositories have the same basename and relative paths.
 - Several linked worktrees share objects but contain different dirty states.
 - A Codex-managed worktree is detached and later deleted.
-- A session writes a file, another session revises it, and a human amends the commit.
+- A session applies a patch, another session revises it, and a human amends the commit.
 - A squash commit combines unrelated sessions.
 - The relevant line is context in a commit diff, not an added line in that commit because blame and parent selection were interpreted incorrectly.
 - Rename detection chooses or misses a similarity match.
@@ -520,7 +594,7 @@ Fixture histories should cover:
 
 After preflight, create minimal synthetic JSONL for every observed schema variant. Include:
 
-- complete session with structured reads, writes, patch, Git commit, test, and linked success results;
+- complete session with session metadata, command attempts, streamed input, patch attempt/result/change payload, optional transcript Git metadata, and linked tool results;
 - session that edits but never commits;
 - resumed and compacted session;
 - archived session;
@@ -584,8 +658,8 @@ Each slice should be reviewable and independently testable.
 ### Slice 3: Codex adapter
 
 - Implement discovery and streaming parsers only for preflight-verified schema variants.
-- Link tool calls/results and extract normalized evidence with source record references.
-- Add unknown/truncated/partial-record diagnostics and safe redaction.
+- Link tool calls/results and extract normalized evidence with source record references; distinguish command attempts, patch attempts, tool-reported patch results, and recovered patch payloads.
+- Add unknown/compacted/rollback/abort/truncated/partial-record/changed-during-read diagnostics and safe redaction.
 - Exit criterion: all redacted adapter fixtures pass, unsupported variants degrade to diagnostics, and realistic header scans meet the preflight latency target.
 
 ### Slice 4: Conservative correlation
@@ -612,7 +686,7 @@ Each slice should be reviewable and independently testable.
 
 ## Risks / unresolved decisions
 
-1. **Codex transcript instability is the primary blocker.** Official documentation explicitly says the transcript format can change. The adapter needs empirical version detection, diagnostics, and fixtures before production code.
+1. **Codex transcript instability remains the primary risk.** The completed preflight establishes a narrow 0.142.5–0.147.0 envelope family, but the adapter must remain version-labelled, diagnostic-heavy, and conservative outside the observed variants.
 2. **Surface support must be named.** “Codex history” may mean CLI, IDE, desktop app, exec, or imported sessions. v0 should claim only surfaces observed during preflight.
 3. **Latency budget is unset.** Choose a target after measuring real history; suggested starting acceptance is under 500 ms for Git-only and under 2 seconds for a warm filesystem with a typical Codex history. These are proposals, not requirements until measured.
 4. **The proposed Git 2.31 floor needs CI proof.** Verify `--path-format`, porcelain-v2, `worktree -z`, and object-format behavior on exactly that version; raise the floor if the required machine-readable behavior differs.
@@ -620,16 +694,17 @@ Each slice should be reviewable and independently testable.
 6. **Merge parent selection needs fixture proof.** Blame porcelain's `previous` metadata may not cover every merge-resolution case. v0 should report ambiguity rather than silently choose first parent.
 7. **Patch fingerprint thresholds need calibration.** The proposed weights and “two distinctive lines” floor are safe starting points but must be evaluated against redacted real sessions and adversarial fixtures.
 8. **Repository relocation loses path identity.** Without a persisted repository ID or remote lookup, old sessions referencing a deleted path may remain unmatched. This is an acceptable local-first v0 limitation.
-9. **Transcript privacy requires default minimization.** Decide whether even user task text should be displayed. Recommendation: show a short task only when it is a structured user prompt from the selected strong session, sanitize it, cap it, and allow a later `--no-prompts` option; never dump transcript bodies.
+9. **Transcript privacy requires default minimization.** Do not retain or display user task text, assistant prose, reasoning, tool output, raw commands, compacted summaries, credentials, or repository URLs in normalized evidence. A future explicitly opt-in diagnostic surface would need a separate privacy review.
 10. **Author attribution is not causation.** Git's author/committer fields and Codex activity are evidence. The copy should say “Likely related Codex session,” not “Written by Codex,” unless a future stronger provenance mechanism warrants that claim.
 
 ## Recommended next action
 
-Perform a focused **Terra preflight before Luna implementation**.
-
-The uncertainty is not ordinary coding risk: the current Codex manual explicitly marks transcript format as unstable, and the architecture depends on details such as cwd records, tool-call/result linkage, patch availability, compaction, subagents, and active versus archived stores. A short Terra task should inspect real local formats read-only, produce only redacted fixtures and a schema/coverage memo, benchmark discovery, and make no production implementation changes.
-
-After that preflight resolves Slice 0, hand Slices 1–6 to Luna with this document and the redacted fixture corpus. The Git-only slice could technically start now, but sequencing it after the preflight prevents the normalized evidence and correlation contracts from being redesigned around incorrect transcript assumptions.
+Implement the bounded **Slice 3 Codex adapter** against the completed redacted
+fixture corpus. Keep discovery metadata-only, require
+`session_meta.payload.session_id`, stream JSONL, preserve subagent sessions as
+separate summaries, and expose unsupported or incomplete coverage as
+diagnostics. Do not begin Git correlation or the final CLI until the adapter
+contract and privacy tests are stable.
 
 ## Documentation basis
 

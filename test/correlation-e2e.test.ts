@@ -38,6 +38,7 @@ interface GitFixture {
   readonly directory: string;
   readonly codexHome: string;
   readonly runner: GitProcess;
+  readonly strictRunner: StrictReadOnlyGitRunner;
 }
 
 async function git(
@@ -76,7 +77,7 @@ async function makeGitFixture(t: test.TestContext): Promise<GitFixture> {
   await git({ directory, runner }, ["config", "user.email", "synthetic@example.test"]);
   await git({ directory, runner }, ["config", "commit.gpgSign", "false"]);
   t.after(async () => rm(directory, { recursive: true, force: true }));
-  return { directory, codexHome, runner };
+  return { directory, codexHome, runner, strictRunner: new StrictReadOnlyGitRunner(runner) };
 }
 
 async function writeFixtureFile(
@@ -245,6 +246,7 @@ function emptyBundle(sessionValue: AgentSessionSummary): AgentEvidenceBundle {
 interface SyntheticSourceOptions {
   readonly availability?: AgentHistoryAvailability;
   readonly diagnostics?: readonly AgentDiagnostic[];
+  readonly expectedHistoryRoot?: string;
   readonly throwOnSummary?: ReadonlySet<string>;
   readonly throwOnExtraction?: ReadonlySet<string>;
 }
@@ -256,7 +258,10 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
   public summaryCalls = 0;
   public extractionCalls = 0;
   public readonly discoveryContexts: AgentHistoryDiscoveryContext[] = [];
-  public readonly extractedRefs: string[] = [];
+  public readonly summarizedRefPaths: string[] = [];
+  public readonly summarizedSessionIds: (string | null)[] = [];
+  public readonly extractedRefPaths: string[] = [];
+  public readonly extractedSessionIds: (string | null)[] = [];
   public readonly extractionTargets: (AgentEvidenceTarget | undefined)[] = [];
   private readonly summariesByPath: ReadonlyMap<string, AgentSessionSummary>;
   private readonly bundlesByPath: ReadonlyMap<string, AgentEvidenceBundle>;
@@ -281,6 +286,9 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
   ): Promise<AgentHistoryDiscoveryResult> {
     this.discoverCalls += 1;
     this.discoveryContexts.push(context ?? {});
+    if (this.options.expectedHistoryRoot !== undefined) {
+      assert.equal(context?.historyRoot, this.options.expectedHistoryRoot);
+    }
     return {
       availability: this.options.availability ?? "available",
       refs: [...this.summariesByPath.values()].map((value) => value.ref),
@@ -290,11 +298,13 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
 
   public async readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary> {
     this.summaryCalls += 1;
+    this.summarizedRefPaths.push(ref.sourcePath);
     if (this.options.throwOnSummary?.has(ref.sourcePath)) {
       throw new Error("synthetic corrupt summary");
     }
     const value = this.summariesByPath.get(ref.sourcePath);
     assert.ok(value !== undefined);
+    this.summarizedSessionIds.push(value.sessionId);
     return value;
   }
 
@@ -303,24 +313,186 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
     target?: AgentEvidenceTarget,
   ): Promise<AgentEvidenceBundle> {
     this.extractionCalls += 1;
-    this.extractedRefs.push(ref.sourcePath);
+    this.extractedRefPaths.push(ref.sourcePath);
     this.extractionTargets.push(target);
     if (this.options.throwOnExtraction?.has(ref.sourcePath)) {
       throw new Error("synthetic corrupt transcript");
     }
     const value = this.bundlesByPath.get(ref.sourcePath);
     assert.ok(value !== undefined);
+    this.extractedSessionIds.push(value.session.sessionId);
     return value;
   }
 }
 
-class RecordingGitRunner implements GitRunner {
+const COMMIT_FORMAT = ["%H", "%P", "%an", "%ae", "%aI", "%cn", "%ce", "%cI", "%s", "%B"]
+  .join("%x00") + "%x00";
+const HEX_ID = /^[0-9a-fA-F]{7,128}$/;
+
+function isHexCommit(value: string): boolean {
+  return HEX_ID.test(value);
+}
+
+function isSafeRepositoryPath(value: string): boolean {
+  return value.length > 0
+    && !value.includes("\u0000")
+    && !value.startsWith("-")
+    && !value.includes("..")
+    && !value.startsWith("/");
+}
+
+interface NormalizedGitArgs {
+  readonly args: readonly string[];
+  readonly configs: readonly string[];
+}
+
+function stripApprovedConfig(args: readonly string[]): NormalizedGitArgs | null {
+  const result: string[] = [];
+  const configs: string[] = [];
+  let index = 0;
+  while (index < args.length && args[index] === "-c") {
+    const setting = args[index + 1];
+    if (setting !== "core.quotePath=false" && setting !== "color.ui=false") {
+      return null;
+    }
+    configs.push(setting);
+    index += 2;
+  }
+  for (; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "-c") return null;
+    result.push(value!);
+  }
+  return { args: result, configs };
+}
+
+function isAllowedReadOnlyGit(
+  args: readonly string[],
+  input: Uint8Array | undefined,
+): boolean {
+  const parsed = stripApprovedConfig(args);
+  if (parsed === null || parsed.args.length === 0) return false;
+  const normalized = parsed.args;
+  const command = normalized[0];
+  const expectedConfigs = command === "blame"
+    ? ["core.quotePath=false", "color.ui=false"]
+    : command === "diff" || command === "diff-tree"
+      ? ["core.quotePath=false"]
+      : [];
+  if (parsed.configs.length !== expectedConfigs.length
+    || parsed.configs.some((value, index) => value !== expectedConfigs[index])) {
+    return false;
+  }
+  const exact = (expected: readonly string[]): boolean =>
+    normalized.length === expected.length && normalized.every((value, index) => value === expected[index]);
+
+  if (command === "rev-parse") {
+    if (exact(["rev-parse", "--is-bare-repository"])) return true;
+    if (exact(["rev-parse", "--path-format=absolute", "--show-toplevel"])) return true;
+    if (exact(["rev-parse", "--path-format=absolute", "--git-dir"])) return true;
+    if (exact(["rev-parse", "--path-format=absolute", "--git-common-dir"])) return true;
+    if (exact(["rev-parse", "--show-object-format"])) return true;
+    if (exact(["rev-parse", "--is-shallow-repository"])) return true;
+    if (exact(["rev-parse", "--verify", "HEAD"])) return true;
+    return normalized.length === 4
+      && normalized[1] === "--verify"
+      && normalized[2] === "--quiet"
+      && /^[0-9a-fA-F]{7,128}\^\{commit\}$/.test(normalized[3]!);
+  }
+  if (command === "symbolic-ref") return exact(["symbolic-ref", "-q", "--short", "HEAD"]);
+  if (command === "worktree") return exact(["worktree", "list", "--porcelain", "-z"]);
+  if (command === "status") {
+    return normalized.length === 6
+      && normalized[1] === "--porcelain=v2"
+      && normalized[2] === "-z"
+      && normalized[3] === "--untracked-files=normal"
+      && normalized[4] === "--"
+      && isSafeRepositoryPath(normalized[5]!);
+  }
+  if (command === "ls-tree") {
+    return normalized.length === 7
+      && normalized[1] === "-r"
+      && normalized[2] === "-z"
+      && normalized[3] === "--name-only"
+      && normalized[4] === "HEAD"
+      && normalized[5] === "--"
+      && isSafeRepositoryPath(normalized[6]!);
+  }
+  if (command === "ls-files") {
+    return normalized.length === 4
+      && normalized[1] === "--error-unmatch"
+      && normalized[2] === "--"
+      && isSafeRepositoryPath(normalized[3]!);
+  }
+  if (command === "cat-file") {
+    return normalized.length === 3
+      && normalized[1] === "-e"
+      && /^[0-9a-fA-F]{7,128}\^\{commit\}$/.test(normalized[2]!);
+  }
+  if (command === "hash-object") {
+    return exact(["hash-object", "-t", "tree", "--stdin"])
+      && input !== undefined
+      && input.byteLength === 0;
+  }
+  if (command === "show") {
+    return normalized.length === 6
+      && normalized[1] === "-s"
+      && normalized[2] === "--no-color"
+      && normalized[3] === "--no-show-signature"
+      && normalized[4] === `--format=${COMMIT_FORMAT}`
+      && isHexCommit(normalized[5]!);
+  }
+  if (command === "diff-tree") {
+    const root = normalized.length === 8
+      && normalized[1] === "--root"
+      && normalized[2] === "-r"
+      && normalized[3] === "-z"
+      && normalized[4] === "--name-status"
+      && normalized[5] === "-M"
+      && normalized[6] === "--no-commit-id"
+      && isHexCommit(normalized[7]!);
+    const parent = normalized.length === 8
+      && normalized[1] === "-r"
+      && normalized[2] === "-z"
+      && normalized[3] === "--name-status"
+      && normalized[4] === "-M"
+      && normalized[5] === "--no-commit-id"
+      && isHexCommit(normalized[6]!)
+      && isHexCommit(normalized[7]!);
+    return root || parent;
+  }
+  if (command === "diff") {
+    return normalized.length >= 9
+      && normalized[1] === "--no-ext-diff"
+      && normalized[2] === "--no-color"
+      && normalized[3] === "--find-renames"
+      && normalized[4] === "--unified=3"
+      && isHexCommit(normalized[5]!)
+      && isHexCommit(normalized[6]!)
+      && normalized[7] === "--"
+      && normalized.slice(8).every(isSafeRepositoryPath);
+  }
+  if (command === "blame") {
+    return normalized.length === 6
+      && normalized[1] === "--line-porcelain"
+      && normalized[2] === "-L"
+      && /^\d+,\d+$/.test(normalized[3]!)
+      && normalized[4] === "--"
+      && isSafeRepositoryPath(normalized[5]!);
+  }
+  return false;
+}
+
+class StrictReadOnlyGitRunner implements GitRunner {
   public readonly calls: (readonly string[])[] = [];
 
   public constructor(private readonly delegate: GitRunner) {}
 
   public run(args: readonly string[], options: { readonly cwd: string; readonly input?: Uint8Array }) {
     this.calls.push([...args]);
+    if (!isAllowedReadOnlyGit(args, options.input)) {
+      throw new Error(`E2E strict Git allowlist rejected argv: ${args.join(" ")}`);
+    }
     return this.delegate.run(args, options);
   }
 }
@@ -329,22 +501,14 @@ async function analyzeWithSource(
   fixture: GitFixture,
   source: SyntheticAgentHistorySource,
   input = `${TARGET_PATH}:2`,
-  runner: GitRunner = fixture.runner,
   codexHome = fixture.codexHome,
 ): Promise<WhylineReport> {
   return analyzeLocation(input, {
     currentDirectory: fixture.directory,
-    git: runner,
+    git: fixture.strictRunner,
     agentHistorySource: source,
     codexHome,
   });
-}
-
-function assertNoRemoteGit(calls: readonly (readonly string[])[]): void {
-  assert.equal(
-    calls.some((args) => args.some((value) => ["remote", "fetch", "push", "clone"].includes(value))),
-    false,
-  );
 }
 
 function assertNoTranscriptExecution(source: SyntheticAgentHistorySource): void {
@@ -360,13 +524,11 @@ test("synthetic end-to-end selection is conservative and renderer-safe", async (
     [matchingSession],
     [bundle(matchingSession, [{ id: "matching-patch", lines: [TARGET_FIRST, TARGET_SECOND] }])],
   );
-  const recording = new RecordingGitRunner(matchingFixture.runner);
-  const matchingReport = await analyzeWithSource(matchingFixture, matchingSource, `${TARGET_PATH}:2`, recording);
+  const matchingReport = await analyzeWithSource(matchingFixture, matchingSource);
   assert.equal(matchingReport.provenance.state, "committed");
   assert.equal(matchingReport.correlation?.status, "matched");
   assert.equal(matchingReport.correlation?.selected?.session.sessionId, "luna-match-01");
   assert.equal(matchingReport.correlation?.selected?.repositoryMatch, "current-worktree");
-  assertNoRemoteGit(recording.calls);
   assertNoTranscriptExecution(matchingSource);
 
   const unrelatedFixture = await targetFixture(t);
@@ -396,6 +558,13 @@ test("synthetic end-to-end selection is conservative and renderer-safe", async (
   const ambiguousReport = await analyzeWithSource(ambiguousFixture, ambiguousSource);
   assert.equal(ambiguousReport.correlation?.status, "ambiguous");
   assert.equal(ambiguousReport.correlation?.selected, undefined);
+  assert.equal(ambiguousReport.correlation?.alternatives.length, 2);
+  assert.equal(ambiguousReport.correlation?.alternatives.every((value) => value.band === "strong"), true);
+  assert.equal(
+    ambiguousReport.correlation?.alternatives.every((value) =>
+      value.signals.some((signal) => signal.kind === "structured-patch-overlap")),
+    true,
+  );
   const ambiguousOutput = renderText(ambiguousReport);
   assert.match(ambiguousOutput, /Multiple strong candidates; no session selected/);
   assert.equal(ambiguousOutput.includes("Likely related Codex session"), false);
@@ -426,9 +595,12 @@ test("empty and missing synthetic history preserve Git success, while uncommitte
   assert.doesNotMatch(renderText(emptyReport), /Likely related Codex session/);
 
   const missingFixture = await targetFixture(t);
-  const missingSource = new SyntheticAgentHistorySource([], [], { availability: "unavailable" });
   const missingHome = path.join(missingFixture.directory, "missing-synthetic-codex-home");
-  const missingReport = await analyzeWithSource(missingFixture, missingSource, `${TARGET_PATH}:2`, missingFixture.runner, missingHome);
+  const missingSource = new SyntheticAgentHistorySource([], [], {
+    availability: "unavailable",
+    expectedHistoryRoot: missingHome,
+  });
+  const missingReport = await analyzeWithSource(missingFixture, missingSource, `${TARGET_PATH}:2`, missingHome);
   assert.equal(missingReport.provenance.state, "committed");
   assert.equal(missingReport.correlation?.status, "unavailable");
   assert.equal(missingReport.correlation?.coverage.status, "unavailable");
@@ -483,8 +655,7 @@ test("privacy-sensitive synthetic transcript fields never reach terminal output 
     { includeCommandAttempt: true },
   );
   const source = new SyntheticAgentHistorySource([privateSession], [privateBundle]);
-  const recording = new RecordingGitRunner(fixture.runner);
-  const report = await analyzeWithSource(fixture, source, `${TARGET_PATH}:2`, recording);
+  const report = await analyzeWithSource(fixture, source);
   const output = renderText(report);
   assert.equal(report.correlation?.status, "matched");
   assert.equal(output.includes(secret), false);
@@ -494,7 +665,6 @@ test("privacy-sensitive synthetic transcript fields never reach terminal output 
   assert.equal(output.includes("TRANSCRIPT_SECRET_COMMAND"), false);
   assert.equal(output.includes(fixture.codexHome), false);
   assert.equal(output.includes(fixture.directory), false);
-  assertNoRemoteGit(recording.calls);
 });
 
 test("bounded discovery reads every summary, extracts at most 32 candidates, and refuses uniqueness", async (t) => {
@@ -508,9 +678,32 @@ test("bounded discovery reads every summary, extracts at most 32 candidates, and
     : emptyBundle(value));
   const source = new SyntheticAgentHistorySource(summaries, bundles);
   const report = await analyzeWithSource(fixture, source);
+  const expectedSummaryRefPaths = summaries.map((value) => value.ref.sourcePath);
+  const expectedSummarySessionIds = summaries.map((value) => value.sessionId);
+  const summarizedRefPaths = new Set(source.summarizedRefPaths);
+  const summarizedSessionIds = new Set(source.summarizedSessionIds);
+  const extractedRefPaths = new Set(source.extractedRefPaths);
+  const extractedSessionIds = new Set(source.extractedSessionIds);
+  const omittedRefPaths = expectedSummaryRefPaths.filter((value) => !extractedRefPaths.has(value));
+  const omittedSessionIds = expectedSummarySessionIds.filter((value) => !extractedSessionIds.has(value));
+
   assert.equal(source.discoverCalls, 1);
   assert.equal(source.summaryCalls, 40);
   assert.equal(source.extractionCalls, 32);
+  assert.equal(source.summarizedRefPaths.length, 40);
+  assert.equal(summarizedRefPaths.size, 40);
+  assert.deepEqual(summarizedRefPaths, new Set(expectedSummaryRefPaths));
+  assert.equal(source.summarizedSessionIds.length, 40);
+  assert.equal(summarizedSessionIds.size, 40);
+  assert.deepEqual(summarizedSessionIds, new Set(expectedSummarySessionIds));
+  assert.equal(source.extractedRefPaths.length, 32);
+  assert.equal(extractedRefPaths.size, 32);
+  assert.equal(source.extractedSessionIds.length, 32);
+  assert.equal(extractedSessionIds.size, 32);
+  assert.equal(omittedRefPaths.length, 8);
+  assert.equal(omittedSessionIds.length, 8);
+  assert.equal(omittedRefPaths.every((value) => !extractedRefPaths.has(value)), true);
+  assert.equal(omittedSessionIds.every((value) => !extractedSessionIds.has(value)), true);
   assert.equal(report.correlation?.coverage.discoveredRefs, 40);
   assert.equal(report.correlation?.coverage.summaryEligibleRefs, 40);
   assert.equal(report.correlation?.coverage.fullyExtractedRefs, 32);
@@ -518,6 +711,10 @@ test("bounded discovery reads every summary, extracts at most 32 candidates, and
   assert.equal(report.correlation?.status, "none");
   assert.equal(report.correlation?.selected, undefined);
   assert.equal(report.correlation?.coverage.limitations.some((value) => value.kind === "candidate-cap" && value.material), true);
+  const retainedObserved = report.correlation?.alternatives.find((value) => value.session.sessionId === "luna-cap-00");
+  assert.ok(retainedObserved !== undefined);
+  assert.equal(retainedObserved.band, "strong");
+  assert.equal(retainedObserved.signals.some((value) => value.kind === "structured-patch-overlap"), true);
   assert.match(renderText(report), /Possible related session: luna-cap-00/);
   assert.match(renderText(report), /insufficient to claim a match/);
 });

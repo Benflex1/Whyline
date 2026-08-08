@@ -61,3 +61,31 @@ One self-review checked the Task 7 bullet list, changed-file scope, temporary
 home/repository cleanup, bounded extraction counters, fixed IDs/timestamps,
 renderer privacy, and remote/transcript execution boundaries. No Task 8 work
 was started.
+
+## Correction round
+
+Addressed the four review gaps in `test/correlation-e2e.test.ts` only:
+
+- ambiguity now requires exactly two alternatives, both `strong`, each with a
+  direct `structured-patch-overlap` signal;
+- the 40-ref cap source records and asserts unique summary/extraction ref paths
+  and session IDs, explicitly identifies the eight omitted refs, and verifies
+  the retained observed candidate is strong while material `candidate-cap`
+  coverage keeps the result at `none`;
+- every E2E analysis now uses a failing strict Git runner with an exact local
+  read-only argv/config/input allowlist. Unknown, remote, transport, and
+  mutating commands fail before delegation;
+- the missing-history fake asserts the exact supplied missing `historyRoot` and
+  continues to verify successful Git provenance with unavailable Codex status.
+
+Correction-round verification:
+
+```text
+npm run build && node --test dist/test/correlation-e2e.test.js
+12 passed, 0 failed
+
+npm run check
+110 passed, 0 failed; typecheck passed
+```
+
+No production changes or Task 8 work were made.

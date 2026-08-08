@@ -1,0 +1,75 @@
+import type {
+  CorrelationCandidate,
+  CorrelationCandidateInput,
+  CorrelationCoverage,
+  CorrelationResult,
+  CorrelationTarget,
+} from "./model.js";
+import { scoreCandidate } from "./score-candidate.js";
+
+function compareCandidates(left: CorrelationCandidate, right: CorrelationCandidate): number {
+  if (right.score !== left.score) return right.score - left.score;
+  const leftId = left.session.sessionId ?? "";
+  const rightId = right.session.sessionId ?? "";
+  if (leftId !== rightId) return leftId.localeCompare(rightId);
+  return left.session.ref.sourcePath.localeCompare(right.session.ref.sourcePath);
+}
+
+function visibleCandidates(candidates: readonly CorrelationCandidate[]): readonly CorrelationCandidate[] {
+  return candidates.filter((candidate) => candidate.band !== "weak");
+}
+
+function sufficientCoverage(
+  target: CorrelationTarget,
+  candidates: readonly CorrelationCandidate[],
+  coverage: CorrelationCoverage,
+): boolean {
+  if (coverage.status !== "complete") return false;
+  if (coverage.omittedEligibleRefs > 0) return false;
+  if (coverage.fullyExtractedRefs < coverage.summaryEligibleRefs) return false;
+  if (coverage.limitations.some((limitation) => limitation.material)) return false;
+  if (target.relevantHunks.some((hunk) => hunk.truncated)) return false;
+  return candidates.every((candidate) =>
+    !candidate.coverageLimitations.some((limitation) => limitation.material));
+}
+
+export function correlate(
+  target: CorrelationTarget,
+  inputs: readonly CorrelationCandidateInput[],
+  coverage: CorrelationCoverage,
+): CorrelationResult {
+  if (coverage.status === "unavailable") {
+    return {
+      status: "unavailable",
+      alternatives: [],
+      coverage,
+    };
+  }
+
+  const candidates = inputs
+    .filter((input) => input.eligible && input.repositoryMatch !== "incompatible")
+    .map((input) => scoreCandidate(target, input))
+    .sort(compareCandidates);
+  const strong = candidates.filter((candidate) => candidate.band === "strong");
+  const alternatives = visibleCandidates(candidates);
+
+  if (strong.length >= 2) {
+    return { status: "ambiguous", alternatives, coverage };
+  }
+
+  const onlyStrong = strong[0];
+  if (onlyStrong !== undefined && sufficientCoverage(target, candidates, coverage)) {
+    return {
+      status: "matched",
+      selected: onlyStrong,
+      alternatives: alternatives.filter((candidate) => candidate !== onlyStrong),
+      coverage,
+    };
+  }
+
+  return {
+    status: "none",
+    alternatives,
+    coverage,
+  };
+}

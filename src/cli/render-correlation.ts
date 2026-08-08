@@ -8,7 +8,9 @@ import type {
 } from "../correlation/model.js";
 
 const MIN_SESSION_ID_PREFIX = 8;
-const MAX_RENDERED_CANDIDATES = 8;
+// The coordinator bounds full extraction at 32 candidates; keep every
+// candidate from a real ambiguous result visible within that same bound.
+const MAX_RENDERED_CANDIDATES = 32;
 const MAX_RENDERED_EXPLANATIONS = 4;
 const MAX_RENDERED_SESSION_ID_LENGTH = 80;
 const SESSION_ID_HASH_LENGTH = 16;

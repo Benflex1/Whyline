@@ -143,6 +143,19 @@ test("renders ambiguity without selecting a session and extends colliding IDs", 
   assert.equal(output.includes("Likely related Codex session"), false);
 });
 
+test("renders every strong candidate in an ambiguous result", () => {
+  const strongCandidates = Array.from({ length: 9 }, (_, index) =>
+    candidate(`strong-candidate-${index + 1}`));
+  const output = renderCorrelation(result("ambiguous", {
+    alternatives: strongCandidates,
+  }));
+
+  for (const value of strongCandidates) {
+    assert.equal(output.includes(value.session.sessionId!), true, value.session.sessionId!);
+  }
+  assert.equal(output.includes("Likely related Codex session"), false);
+});
+
 test("keeps distinct session IDs distinct after safe encoding", () => {
   const output = renderCorrelation(result("ambiguous", {
     alternatives: [candidate("a/b"), candidate("a?b")],

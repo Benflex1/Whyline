@@ -75,6 +75,15 @@ export type AgentOperation =
   | "patch"
   | "mcp";
 
+export interface AgentPatchHunkRange {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+}
+
+export type AgentPatchMatchSide = "added" | "deleted" | "content";
+
 export interface AgentPatchChange {
   readonly path: string;
   readonly changeType: "update" | "add" | "delete" | "unknown";
@@ -85,6 +94,10 @@ export interface AgentPatchChange {
   readonly payloadTruncated: boolean;
   /** Non-reversible per-line digests retained for future hunk comparison. */
   readonly addedLineFingerprints: readonly string[];
+  readonly matchLineFingerprints: readonly string[];
+  readonly distinctiveLineFingerprints: readonly string[];
+  readonly matchSide: AgentPatchMatchSide;
+  readonly hunkRanges: readonly AgentPatchHunkRange[];
   readonly lineCount: number;
   readonly movedFrom?: string | undefined;
 }

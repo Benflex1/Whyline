@@ -319,6 +319,88 @@ test("failed patch and update/add/delete change payloads remain separate from su
   assert.doesNotMatch(JSON.stringify(bundle), /SECRET_ADDED_SOURCE|SECRET_DELETED_SOURCE|old|new/);
 });
 
+test("structured patch evidence normalizes operation sides, ranges, truncation, and distinctiveness", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const oversizedContent = `SECRET_TRUNCATED_SOURCE\nconst truncatedFirst = true;\nconst truncatedSecond = false;\n${"const retainedLine = true;\n".repeat(20_000)}`;
+  const sourcePath = await writeTranscript(directory, "task-2-patch-contract.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "task-2-patch-attempt",
+      call_id: "call-task-2-patch",
+      name: "apply_patch",
+      input: "SECRET_RAW_PATCH_INPUT",
+    }),
+    eventRecord({
+      type: "patch_apply_end",
+      call_id: "call-task-2-patch",
+      success: true,
+      status: "completed",
+      changes: {
+        "/home/alice/projects/example/src/update.ts": {
+          type: "update",
+          unified_diff: [
+            "@@ -10,2 +20,4 @@ private secret context",
+            "-removed secret source",
+            "+{",
+            "+const firstMeaningful = true;",
+            "+const secondMeaningful = false;",
+            "+}",
+          ].join("\r\n"),
+        },
+        "/home/alice/projects/example/src/add.ts": {
+          type: "add",
+          content: "{\r\nconst addedFirst = true;\r\nconst addedSecond = false;\r\n}\r\n",
+        },
+        "/home/alice/projects/example/src/delete.ts": {
+          type: "delete",
+          content: "{\nconst deletedFirst = true;\nconst deletedSecond = false;\n}\n",
+        },
+        "/home/alice/projects/example/src/truncated.ts": {
+          type: "add",
+          content: oversizedContent,
+        },
+      },
+    }),
+  ]);
+
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const result = evidenceOf(bundle, "patch-result")[0];
+  assert.ok(result?.patch);
+  const changes = result.patch.changes;
+  assert.equal(changes.length, 4);
+
+  const update = changes[0];
+  assert.equal(update?.matchSide, "added");
+  assert.deepEqual(update?.hunkRanges, [{ oldStart: 10, oldLines: 2, newStart: 20, newLines: 4 }]);
+  assert.equal(update?.matchLineFingerprints.length, 4);
+  assert.equal(update?.addedLineFingerprints.length, 4);
+  assert.ok((update?.distinctiveLineFingerprints.length ?? 0) >= 2);
+
+  const added = changes[1];
+  assert.equal(added?.matchSide, "content");
+  assert.deepEqual(added?.hunkRanges, []);
+  assert.equal(added?.matchLineFingerprints.length, 5);
+  assert.equal(added?.addedLineFingerprints.length, 5);
+  assert.ok((added?.distinctiveLineFingerprints.length ?? 0) >= 2);
+
+  const deleted = changes[2];
+  assert.equal(deleted?.matchSide, "deleted");
+  assert.deepEqual(deleted?.hunkRanges, []);
+  assert.equal(deleted?.matchLineFingerprints.length, 5);
+  assert.deepEqual(deleted?.addedLineFingerprints, []);
+  assert.ok((deleted?.distinctiveLineFingerprints.length ?? 0) >= 2);
+
+  const truncated = changes[3];
+  assert.equal(truncated?.payloadTruncated, true);
+  assert.ok((truncated?.matchLineFingerprints.length ?? 0) <= 128);
+  assert.ok((truncated?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  assert.doesNotMatch(
+    JSON.stringify(bundle),
+    /SECRET_RAW_PATCH_INPUT|SECRET_TRUNCATED_SOURCE|private secret context|removed secret source|addedFirst|deletedFirst/,
+  );
+});
+
 test("unknown, compaction, rollback, abort, and unlinked results become diagnostics", async (t) => {
   const directory = await temporaryDirectory(t);
   const sourcePath = await writeTranscript(directory, "coverage.jsonl", [

@@ -154,6 +154,30 @@ export function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+const BOILERPLATE_LINES = new Set([
+  "begin patch",
+  "end patch",
+  "no newline at end of file",
+  "pass",
+  "return;",
+  "return null;",
+  "return undefined;",
+]);
+
+export function isDistinctiveLine(value: string): boolean {
+  const line = value.trim();
+  if (
+    line.length < 4
+    || /^[\p{P}\p{S}\s]+$/u.test(line)
+    || /^[A-Za-z_$][\w$]*$/.test(line)
+  ) {
+    return false;
+  }
+
+  return !BOILERPLATE_LINES.has(line.toLowerCase())
+    && !/^(?:return|throw|yield)\s+[A-Za-z_$][\w$]*;?$/.test(line);
+}
+
 export function diagnostic(
   kind: AgentDiagnostic["kind"],
   record?: number,

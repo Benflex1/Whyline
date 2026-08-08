@@ -451,7 +451,8 @@ class EvidenceCollector {
     }
 
     const call = this.calls.get(callId);
-    if (call === undefined || call.operation !== "patch") {
+    const linkedPatch = call?.operation === "patch";
+    if (!linkedPatch) {
       context.addDiagnostic(diagnostic("unlinked-tool-result", record.recordNumber));
     } else {
       this.markCallResult(callId, context, record.recordNumber);
@@ -478,7 +479,7 @@ class EvidenceCollector {
       paths,
       operation: "patch",
       callId,
-      resultRecorded: true,
+      resultRecorded: linkedPatch,
       ...(reportedSuccess === undefined ? {} : { reportedSuccess }),
       ...(status === undefined ? {} : { status }),
       patch,

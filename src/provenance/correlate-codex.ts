@@ -173,6 +173,7 @@ function diagnosticLimitations(
       case "conflicting-session-metadata":
       case "retention-limit":
       case "unsupported-source":
+      case "unlinked-tool-result":
         add(limitation("summary-coverage", true));
         break;
       default:
@@ -237,6 +238,51 @@ function relativeRepositoryPath(root: string, value: string): string | null {
   return relative.split(path.sep).join("/");
 }
 
+function targetPathAliases(target: CorrelationTarget): ReadonlySet<string> {
+  const paths = new Set<string>();
+  const add = (value: string | null): boolean => {
+    if (value === null || paths.has(value)) return false;
+    paths.add(value);
+    return true;
+  };
+
+  add(target.targetPath);
+  add(target.blamedPath);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const changedPath of target.changedPaths) {
+      if ((changedPath.oldPath === null || !paths.has(changedPath.oldPath))
+        && (changedPath.newPath === null || !paths.has(changedPath.newPath))) {
+        continue;
+      }
+      changed = add(changedPath.oldPath) || changed;
+      changed = add(changedPath.newPath) || changed;
+    }
+  }
+  return paths;
+}
+
+function hasResolvedTargetAnchor(
+  references: readonly ResolvedCommitReference[],
+): boolean {
+  return references.some((reference) =>
+    reference.resolution === "target"
+      && (reference.kind === "session-head" || reference.kind === "produced-commit"));
+}
+
+function hasNormalizedPatchPaths(
+  evidence: AgentEvidenceBundle["evidence"][number],
+): boolean {
+  if (evidence.commitIds.length > 0) return true;
+  if (evidence.kind !== "patch-result" || evidence.patch === undefined) return false;
+  return evidence.patch.changes.length > 0
+    && evidence.patch.changes.every((change) =>
+      [change.path, change.movedFrom].every((value) =>
+        value === undefined
+          || (value.length > 0 && value !== "<outside-session-root>" && !path.isAbsolute(value))));
+}
+
 function evidenceDirectory(
   value: string,
   sessionInitialCwd: string | undefined,
@@ -282,6 +328,7 @@ async function projectEvidencePath(
   repository: RepositoryContext,
   runner: GitRunner,
   mapping: HistoricalPathMapping | null,
+  historicalAnchorPaths: ReadonlySet<string> | null,
 ): Promise<ProjectedEvidencePath> {
   if (value === "<outside-session-root>" || value.length === 0) {
     return { value: null, incompatible: false };
@@ -304,7 +351,11 @@ async function projectEvidencePath(
     };
   }
 
-  if (mapping === null) return { value: null, incompatible: false };
+  if (mapping === null) {
+    return historicalAnchorPaths?.has(value) === true
+      ? { value, incompatible: false }
+      : { value: null, incompatible: false };
+  }
   const historicalPath = path.resolve(mapping.historicalCwd, value);
   const pathResolution = await resolveHistoricalPath(runner, repository, historicalPath);
   if (pathResolution?.repositoryMatch === "incompatible") {
@@ -324,6 +375,7 @@ async function projectEvidence(
   repository: RepositoryContext,
   runner: GitRunner,
   cwdlessResolution: HistoricalDirectoryResolution | null,
+  historicalAnchorPaths: ReadonlySet<string> | null,
 ): Promise<AgentEvidenceBundle["evidence"][number] | null> {
   const evidenceDirectoryValue = evidence.cwd === undefined
     ? null
@@ -343,6 +395,7 @@ async function projectEvidence(
       repository,
       runner,
       evidenceResolution.pathMapping,
+      null,
     );
     incompatible ||= projected.incompatible;
     return projected.value;
@@ -359,6 +412,7 @@ async function projectEvidence(
         repository,
         runner,
         evidenceResolution.pathMapping,
+        historicalAnchorPaths,
       );
       incompatible ||= normalizedPath.incompatible;
       if (normalizedPath.value === null) continue;
@@ -369,6 +423,7 @@ async function projectEvidence(
           repository,
           runner,
           evidenceResolution.pathMapping,
+          historicalAnchorPaths,
         );
       incompatible ||= normalizedMovedFrom?.incompatible ?? false;
       if (normalizedMovedFrom?.incompatible === true) continue;
@@ -410,6 +465,7 @@ async function projectEvidenceBundle(
   repository: RepositoryContext,
   runner: GitRunner,
   cwdlessResolution: HistoricalDirectoryResolution | null,
+  historicalAnchorPaths: ReadonlySet<string> | null,
 ): Promise<AgentEvidenceBundle> {
   const evidence = (await Promise.all(bundle.evidence.map((value) => projectEvidence(
     value,
@@ -417,6 +473,7 @@ async function projectEvidenceBundle(
     repository,
     runner,
     cwdlessResolution,
+    historicalAnchorPaths,
   )))).filter((value): value is NonNullable<typeof value> => value !== null);
   return {
     session: projectSessionSummary(bundle.session),
@@ -812,6 +869,13 @@ export async function correlateCodex(
     const evidenceAssessment = bundle === null
       ? null
       : await classifyRepository(options.git, options.repository, evidenceSession);
+    const historicalAnchorPaths = bundle !== null
+      && evidenceAssessment?.repositoryMatch === "unknown"
+      && (candidate.repositoryMatch === "unknown"
+        || candidate.repositoryMatch === "historical-commit-anchored")
+      && hasResolvedTargetAnchor(candidate.references)
+      ? targetPathAliases(options.target)
+      : null;
     const fullRepositoryMatchValue = bundle === null
       ? candidate.repositoryMatch
       : evidenceAssessment === null
@@ -820,7 +884,9 @@ export async function correlateCodex(
     const cwdlessCoverageLimitations = bundle !== null
       && evidenceAssessment?.cwdlessResolution === null
       && bundle.evidence.some((value) =>
-        value.cwd === undefined && evidenceMayAffectCorrelation(value))
+        value.cwd === undefined
+          && evidenceMayAffectCorrelation(value)
+          && (historicalAnchorPaths === null || !hasNormalizedPatchPaths(value)))
       ? [limitation("summary-coverage", true)]
       : [];
     const projectedBundle = bundle === null
@@ -830,6 +896,7 @@ export async function correlateCodex(
         options.repository,
         options.git,
         evidenceAssessment?.cwdlessResolution ?? null,
+        historicalAnchorPaths,
       );
     const fullReferences = bundle === null
       ? candidate.references

@@ -177,6 +177,8 @@ function diagnosticLimitation(
       };
     case "retention-limit":
       return { kind: "summary-coverage", material: true };
+    case "unlinked-tool-result":
+      return { kind: "summary-coverage", material: true };
     case "conflicting-session-metadata":
       return { kind: "summary-coverage", material: true };
     default:

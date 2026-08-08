@@ -663,6 +663,91 @@ test("full evidence cwd missing or unresolvable retains unknown conservative beh
   assert.equal(report.correlation?.coverage.status, "complete");
 });
 
+test("unknown historical cwd with a resolved session-head projects only an exact target patch path", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const anchoredHistoricalFirst = \"alpha\";";
+  const secondLine = "const anchoredHistoricalSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const missingCwd = path.join(f.directory, "arbitrary-unregistered-cwd");
+
+  const ref = reference(f, "anchored-historical-cwd");
+  const session = summary(ref, missingCwd, commit, { sessionId: "anchored-historical-cwd" });
+  const source = new FakeAgentHistorySource(
+    session,
+    evidence(session, [firstLine, secondLine], "src-target.ts"),
+  );
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "unknown");
+  assert.equal(
+    report.correlation?.selected?.signals.some((signal) => signal.kind === "structured-patch-overlap"),
+    true,
+  );
+  assert.equal(report.correlation?.coverage.status, "complete");
+  assert.equal(JSON.stringify(report.correlation).includes(missingCwd), false);
+
+  const noAnchorRef = reference(f, "unanchored-historical-cwd");
+  const noAnchorSession = summary(noAnchorRef, missingCwd, commit, {
+    sessionId: "unanchored-historical-cwd",
+    transcriptGit: undefined,
+  });
+  const noAnchorSource = new FakeAgentHistorySource(
+    noAnchorSession,
+    evidence(noAnchorSession, [firstLine, secondLine], "src-target.ts"),
+  );
+  const noAnchorReport = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: noAnchorSource,
+    codexHome: path.join(f.directory, "synthetic-home-no-anchor"),
+  });
+
+  assert.equal(noAnchorReport.correlation?.status, "none");
+  assert.equal(noAnchorSource.extractionCalls, 0);
+  assert.equal(
+    noAnchorReport.correlation?.coverage.limitations.some((value) =>
+      value.kind === "unresolved-repository-candidate" && value.material),
+    true,
+  );
+});
+
+test("historical anchor projection rejects a basename-only patch path", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const basenameOnlyFirst = \"alpha\";";
+  const secondLine = "const basenameOnlySecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const missingCwd = path.join(f.directory, "another-unregistered-cwd");
+  const ref = reference(f, "basename-only-historical-cwd");
+  const session = summary(ref, missingCwd, commit, { sessionId: "basename-only-historical-cwd" });
+  const source = new FakeAgentHistorySource(
+    session,
+    evidence(session, [firstLine, secondLine], "target.ts"),
+  );
+
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(
+    (report.correlation?.alternatives ?? []).some((candidate) =>
+      candidate.signals.some((signal) => signal.kind.startsWith("structured-patch"))),
+    false,
+  );
+});
+
 test("an incompatible nested-repository distinctive patch cannot make a candidate strong", async (t) => {
   const f = await fixture(t);
   const firstLine = "const incompatibleFirst = \"alpha\";";

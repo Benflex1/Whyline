@@ -272,6 +272,43 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);
 });
 
+test("unlinked patch completion retains structured audit evidence without result linkage", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const sourcePath = await writeTranscript(directory, "unlinked-patch-result.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "command-item",
+      call_id: "call-command",
+      name: "exec",
+      input: "opaque command text",
+    }),
+    eventRecord({
+      type: "patch_apply_end",
+      call_id: "call-command",
+      status: "completed",
+      success: true,
+      changes: {
+        "/home/alice/projects/example/src/orphan.ts": {
+          type: "update",
+          unified_diff: [
+            "@@ -1,0 +1,2 @@",
+            "+const orphanFirst = true;",
+            "+const orphanSecond = false;",
+          ].join("\n"),
+        },
+      },
+    }),
+  ]);
+
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const result = evidenceOf(bundle, "patch-result")[0];
+  assert.equal(result?.resultRecorded, false);
+  assert.equal(result?.reportedSuccess, true);
+  assert.equal(result?.patch?.changes[0]?.payloadRecovered, true);
+  assert.ok(bundle.diagnostics.some((item) => item.kind === "unlinked-tool-result"));
+});
+
 test("failed patch and update/add/delete change payloads remain separate from success", async (t) => {
   const directory = await temporaryDirectory(t);
   const sourcePath = await writeTranscript(directory, "failed-patch.jsonl", [

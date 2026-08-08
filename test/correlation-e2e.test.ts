@@ -18,6 +18,7 @@ import type {
   AgentSessionRef,
   AgentSessionSummary,
 } from "../src/agents/agent-history-source.js";
+import { CodexHistorySource } from "../src/agents/codex/index.js";
 import { GitProcess, type GitRunner } from "../src/git/git-process.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
 import { renderText } from "../src/cli/render-text.js";
@@ -635,6 +636,72 @@ test("stale session-head context does not defeat an equivalent current structure
   assert.equal(report.correlation?.selected?.session.sessionId, "luna-stale-head-01");
   assert.equal(report.correlation?.selected?.signals.some((value) => value.kind === "structured-patch-overlap"), true);
   assert.equal(report.correlation?.selected?.signals.some((value) => value.kind === "session-head-target-reference"), false);
+});
+
+test("an orphaned structured patch result cannot become strong, matched, or Likely", async (t) => {
+  const fixture = await targetFixture(t);
+  const sessions = path.join(fixture.codexHome, "sessions", "2026", "08", "08");
+  await mkdir(sessions, { recursive: true });
+  const transcriptPath = path.join(sessions, "orphaned-patch-result.jsonl");
+  const patchPath = path.join(fixture.directory, TARGET_PATH);
+  const records = [
+    {
+      timestamp: FIXED_START,
+      type: "session_meta",
+      payload: {
+        session_id: "luna-orphaned-patch",
+        timestamp: FIXED_START,
+        cwd: fixture.directory,
+        git: { commit_hash: fixture.commit },
+      },
+    },
+    {
+      timestamp: FIXED_PATCH_TIME,
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        call_id: "call-non-patch",
+        name: "exec",
+        input: "opaque command text",
+      },
+    },
+    {
+      timestamp: "2026-08-08T01:10:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "patch_apply_end",
+        call_id: "call-non-patch",
+        status: "completed",
+        success: true,
+        changes: {
+          [patchPath]: {
+            type: "update",
+            unified_diff: [
+              "@@ -0,0 +1,2 @@",
+              `+${TARGET_FIRST}`,
+              `+${TARGET_SECOND}`,
+            ].join("\n"),
+          },
+        },
+      },
+    },
+  ];
+  await writeFile(transcriptPath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+
+  const report = await analyzeLocation(`${TARGET_PATH}:2`, {
+    currentDirectory: fixture.directory,
+    git: fixture.strictRunner,
+    agentHistorySource: new CodexHistorySource(),
+    codexHome: fixture.codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(
+    (report.correlation?.alternatives ?? []).some((candidate) => candidate.band === "strong"),
+    false,
+  );
+  assert.doesNotMatch(renderText(report), /Likely related Codex session/);
 });
 
 test("privacy-sensitive synthetic transcript fields never reach terminal output or remote Git", async (t) => {

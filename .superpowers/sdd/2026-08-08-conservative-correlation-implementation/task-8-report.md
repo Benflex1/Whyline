@@ -225,3 +225,42 @@ The remote-tracking ref was
 `origin/feat/conservative-correlation` at `004fb494be84b154a8909e4dbda2f69222271420`.
 At the evidence boundary the local branch was ahead by 26 commits. No push or
 pull request was created.
+
+## Final fixer wave: exact linkage and anchored historical projection
+
+This final scoped wave started from `e2cd106` on
+`feat/conservative-correlation` and addressed the two load-bearing whole-branch
+review findings together.
+
+- Exact `patch_apply_end` linkage now controls `resultRecorded`. A missing,
+  unknown, or non-patch call ID still retains a normalized structured patch
+  result when an ID is present, but it is not a recorded patch completion and
+  cannot enter successful patch scoring. The adapter keeps the unlinked-result
+  diagnostic and maps it to material summary coverage. No linkage is inferred
+  from command text, shell output, prompts, or other arbitrary transcript text.
+- Unknown or deleted historical cwd projection now has one bounded escape hatch:
+  a uniquely resolved target commit reference, unknown repository context in
+  both summary and full evidence, and normalized structured patch changes. Only
+  exact Git-derived target/blame/rename path aliases are projected; basenames,
+  arbitrary relative paths, commands, prompts, and raw text do not establish
+  repository identity. Mixed known/unknown context and unanchored candidates
+  retain the prior filtering and coverage behavior.
+- Regressions cover adapter linkage and diagnostic retention, an actual
+  `CodexHistorySource` orphaned two-distinctive-line patch that cannot become
+  strong, matched, or “Likely,” an anchored arbitrary unregistered cwd, the
+  no-anchor negative, and basename-only path rejection.
+
+Focused verification after the source/test changes:
+
+```text
+npm run build
+exit 0
+
+node --test dist/test/codex-history.test.js dist/test/correlation-patch.test.js dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-target.test.js dist/test/provenance-correlation-flow.test.js dist/test/correlation-e2e.test.js dist/test/git-provenance.test.js
+exit 0; 107 passed, 0 failed, 0 cancelled
+```
+
+The single self-review found six scoped source/test files changed plus this
+report, with no renderer or unrelated Task 1–4 redesign. The broad full
+verification remains intentionally deferred to the coordinator's one final
+pass.

@@ -99,6 +99,14 @@ function evidenceReferences(bundle: AgentEvidenceBundle): readonly RawReference[
   return references;
 }
 
+function evidenceMayAffectCorrelation(
+  evidence: AgentEvidenceBundle["evidence"][number],
+): boolean {
+  if (evidence.commitIds.length > 0) return true;
+  if (evidence.kind !== "patch-attempt" && evidence.kind !== "patch-result") return false;
+  return evidence.paths.length > 0 || (evidence.patch?.changes.length ?? 0) > 0;
+}
+
 async function resolveReferences(
   runner: GitRunner,
   repository: RepositoryContext,
@@ -190,6 +198,7 @@ interface RepositoryAssessment {
   readonly repositoryMatch: CorrelationRepositoryMatch;
   readonly pathMapping: HistoricalPathMapping | null;
   readonly initialResolution: HistoricalDirectoryResolution;
+  readonly cwdlessResolution: HistoricalDirectoryResolution | null;
 }
 
 interface ProjectedEvidencePath {
@@ -314,16 +323,17 @@ async function projectEvidence(
   session: AgentSessionSummary,
   repository: RepositoryContext,
   runner: GitRunner,
-  fallbackResolution: HistoricalDirectoryResolution,
+  cwdlessResolution: HistoricalDirectoryResolution | null,
 ): Promise<AgentEvidenceBundle["evidence"][number] | null> {
   const evidenceDirectoryValue = evidence.cwd === undefined
     ? null
     : evidenceDirectory(evidence.cwd, session.initialCwd);
   const evidenceResolution = evidence.cwd === undefined
-    ? fallbackResolution
+    ? cwdlessResolution
     : evidenceDirectoryValue === null
       ? { repositoryMatch: "unknown" as const, pathMapping: null }
       : await resolveHistoricalDirectory(runner, repository, evidenceDirectoryValue);
+  if (evidenceResolution === null) return null;
   if (evidenceResolution.repositoryMatch === "incompatible") return null;
 
   let incompatible = false;
@@ -399,14 +409,14 @@ async function projectEvidenceBundle(
   bundle: AgentEvidenceBundle,
   repository: RepositoryContext,
   runner: GitRunner,
-  fallbackResolution: HistoricalDirectoryResolution,
+  cwdlessResolution: HistoricalDirectoryResolution | null,
 ): Promise<AgentEvidenceBundle> {
   const evidence = (await Promise.all(bundle.evidence.map((value) => projectEvidence(
     value,
     bundle.session,
     repository,
     runner,
-    fallbackResolution,
+    cwdlessResolution,
   )))).filter((value): value is NonNullable<typeof value> => value !== null);
   return {
     session: projectSessionSummary(bundle.session),
@@ -561,6 +571,7 @@ async function classifyRepository(
     ...summary.workingDirectories,
   ].filter((value): value is string => value !== undefined))];
   let foundIncompatible = false;
+  let foundUnresolved = false;
   let match: CorrelationRepositoryMatch = "unknown";
   let pathMapping: HistoricalPathMapping | null = null;
   let initialResolution: HistoricalDirectoryResolution = {
@@ -580,6 +591,10 @@ async function classifyRepository(
       foundIncompatible = true;
       continue;
     }
+    if (resolved.repositoryMatch === "unknown") {
+      foundUnresolved = true;
+      continue;
+    }
     match = positiveMatch(match, resolved.repositoryMatch);
   }
 
@@ -587,6 +602,7 @@ async function classifyRepository(
     repositoryMatch: foundIncompatible ? "incompatible" : match,
     pathMapping,
     initialResolution,
+    cwdlessResolution: foundIncompatible || foundUnresolved ? null : initialResolution,
   };
 }
 
@@ -796,22 +812,24 @@ export async function correlateCodex(
     const evidenceAssessment = bundle === null
       ? null
       : await classifyRepository(options.git, options.repository, evidenceSession);
-    const evidenceResolution = evidenceAssessment?.initialResolution ?? {
-      repositoryMatch: "unknown" as const,
-      pathMapping: null,
-    };
     const fullRepositoryMatchValue = bundle === null
       ? candidate.repositoryMatch
       : evidenceAssessment === null
         ? candidate.repositoryMatch
         : fullRepositoryMatch(candidate.repositoryMatch, evidenceAssessment);
+    const cwdlessCoverageLimitations = bundle !== null
+      && evidenceAssessment?.cwdlessResolution === null
+      && bundle.evidence.some((value) =>
+        value.cwd === undefined && evidenceMayAffectCorrelation(value))
+      ? [limitation("summary-coverage", true)]
+      : [];
     const projectedBundle = bundle === null
       ? null
       : await projectEvidenceBundle(
         bundle,
         options.repository,
         options.git,
-        evidenceResolution,
+        evidenceAssessment?.cwdlessResolution ?? null,
       );
     const fullReferences = bundle === null
       ? candidate.references
@@ -829,6 +847,7 @@ export async function correlateCodex(
       coverageLimitations: [
         ...candidate.input.coverageLimitations,
         ...extractionLimitations,
+        ...cwdlessCoverageLimitations,
       ],
     };
     inputs.set(candidate.ref.sourcePath, buildCandidateInput(fullRequest));

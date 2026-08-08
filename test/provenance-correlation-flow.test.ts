@@ -165,6 +165,17 @@ function emptyEvidenceBundle(session: AgentSessionSummary): AgentEvidenceBundle 
   };
 }
 
+function evidenceWithoutCwd(bundle: AgentEvidenceBundle): AgentEvidenceBundle {
+  return {
+    ...bundle,
+    evidence: bundle.evidence.map((value) => {
+      const result = { ...value };
+      delete result.cwd;
+      return result;
+    }),
+  };
+}
+
 interface FakeAgentHistoryOptions {
   readonly availability?: AgentHistoryAvailability;
   readonly diagnostics?: readonly AgentDiagnostic[];
@@ -722,4 +733,136 @@ test("mixed valid and nested-repository evidence retains the valid same-reposito
   const overlap = report.correlation?.selected?.signals.find((signal) => signal.kind === "structured-patch-overlap");
   assert.deepEqual(overlap?.evidenceIds, ["valid-evidence"]);
   assert.equal(JSON.stringify(report.correlation).includes("nested-evidence"), false);
+});
+
+test("cwd-less full patch evidence cannot inherit the initial target mapping after nested context", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const cwdlessNestedFirst = \"alpha\";";
+  const secondLine = "const cwdlessNestedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const ref = reference(f, "cwdless-nested-context");
+  const session = summary(ref, f.directory, commit, { sessionId: "cwdless-nested-context" });
+  const bundle = evidence(session, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(session, {
+    ...evidenceWithoutCwd(bundle),
+    session: {
+      ...session,
+      workingDirectories: [f.directory, nestedRepository],
+    },
+  });
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(report.correlation?.coverage.status, "limited");
+  assert.equal(report.correlation?.coverage.limitations.some((value) => value.material), true);
+  assert.equal(
+    (report.correlation?.alternatives ?? []).some((candidate) =>
+      candidate.signals.some((signal) => signal.kind.startsWith("structured-patch"))),
+    false,
+  );
+});
+
+test("cwd-less evidence inherits when all observed directories share the target common Git directory", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const cwdlessSameCommonFirst = \"alpha\";";
+  const secondLine = "const cwdlessSameCommonSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const observedDirectory = path.join(f.directory, "observed");
+  await mkdir(observedDirectory, { recursive: true });
+  const commit = await commitTarget(f);
+
+  const ref = reference(f, "cwdless-same-common");
+  const summarySession = summary(ref, f.directory, commit, { sessionId: "cwdless-same-common" });
+  const fullSession = {
+    ...summarySession,
+    workingDirectories: [f.directory, observedDirectory],
+  };
+  const bundle = evidence(fullSession, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(summarySession, evidenceWithoutCwd(bundle));
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
+  assert.equal(
+    report.correlation?.selected?.signals.some((signal) => signal.kind === "structured-patch-overlap"),
+    true,
+  );
+});
+
+test("ambiguous cwd-less evidence records material coverage when it could affect uniqueness", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const cwdlessUnknownFirst = \"alpha\";";
+  const secondLine = "const cwdlessUnknownSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const missingDirectory = path.join(f.directory, "missing-context");
+
+  const ref = reference(f, "cwdless-unknown-context");
+  const session = summary(ref, f.directory, commit, { sessionId: "cwdless-unknown-context" });
+  const bundle = evidence(session, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(session, {
+    ...evidenceWithoutCwd(bundle),
+    session: {
+      ...session,
+      workingDirectories: [f.directory, missingDirectory],
+    },
+  });
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(report.correlation?.coverage.status, "limited");
+  assert.equal(report.correlation?.coverage.limitations.some((value) => value.material), true);
+});
+
+test("cwd-less evidence remains valid across linked worktrees sharing the common Git directory", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const cwdlessLinkedFirst = \"alpha\";";
+  const secondLine = "const cwdlessLinkedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const linkedParent = await mkdtemp(path.join(os.tmpdir(), "whyline-cwdless-linked-"));
+  const linked = path.join(linkedParent, "linked");
+  t.after(async () => rm(linkedParent, { recursive: true, force: true }));
+  await runGit(f, ["worktree", "add", "--detach", linked, commit]);
+
+  const ref = reference(f, "cwdless-linked-context");
+  const summarySession = summary(ref, f.directory, commit, { sessionId: "cwdless-linked-context" });
+  const fullSession = {
+    ...summarySession,
+    workingDirectories: [f.directory, linked],
+  };
+  const bundle = evidence(fullSession, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(summarySession, evidenceWithoutCwd(bundle));
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
+  assert.equal(report.correlation?.coverage.status, "complete");
 });

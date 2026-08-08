@@ -439,3 +439,49 @@ npm run build && node --test dist/test/provenance-correlation-flow.test.js
 git diff --check
 passed
 ```
+
+## Direct Task 5 correction: conservative cwd-less full-bundle projection
+
+### Reviewed defect addressed
+
+The full extracted bundle can observe a valid initial target-repository cwd and
+then observe a known unrelated nested repository only through
+`workingDirectories`. A patch-result record may legitimately have no explicit
+`cwd`. The previous projection reused the initial valid mapping for that record,
+allowing its normalized patch to create a false target match.
+
+### Minimal boundary correction
+
+- Full-bundle directory classification now retains a separate nullable
+  cwd-less inheritance resolution. Any known incompatible or unresolved full
+  bundle directory disables inheritance; explicit evidence cwd classification
+  remains independent.
+- Cwd-less evidence is projected only when every observed directory resolves to
+  compatible current/linked/same-common-directory context. Ambiguous cwd-less
+  records are removed before references or scoring; relevant removed records
+  add a material `summary-coverage` limitation.
+- Explicit same-repository evidence remains usable in mixed bundles, while
+  explicit incompatible evidence remains rejected. Same-common-directory
+  linked worktrees remain valid, and missing/unresolvable context stays
+  conservative.
+- The pure normalized projection continues to omit absolute cwd and source
+  paths; path normalization does not establish repository identity.
+
+### Focused regression coverage
+
+Added four cwd-less flow regressions for nested incompatible context, compatible
+same-common inheritance, material coverage from unresolved ambiguity, and
+same-common linked worktrees. The five existing recovery regressions and prior
+Task 5 flow tests remain present. The single requested focused run passed:
+
+```text
+npm run build && node --test dist/test/provenance-correlation-flow.test.js
+18 passed, 0 failed
+```
+
+### One self-review
+
+The reviewed diff is limited to `src/provenance/correlate-codex.ts` and
+`test/provenance-correlation-flow.test.ts`; `git diff --check` passed. Tasks 6–8
+were not started, no broad verification was run, and no additional review cycle
+was performed.

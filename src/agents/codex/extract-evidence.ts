@@ -3,8 +3,9 @@ import type {
   AgentEvidenceBundle,
   AgentOperation,
   AgentPatchChange,
+  AgentPatchHunkRange,
   AgentSessionRef,
-  CorrelationTarget,
+  AgentEvidenceTarget,
 } from "../agent-history-source.js";
 import {
   boundPayload,
@@ -13,6 +14,7 @@ import {
   getBoolean,
   getRecord,
   isRecord,
+  isDistinctiveLine,
   MAX_PATCH_LINE_FINGERPRINTS,
   normalizeEventCwd,
   normalizeEventPath,
@@ -75,7 +77,7 @@ function patchInputPaths(
   input: unknown,
   sessionCwd: string | undefined,
 ): PatchAttempt {
-  if (typeof input !== "string") {
+  if (typeof input !== "string" || sessionCwd === undefined) {
     return { paths: [] };
   }
 
@@ -97,18 +99,49 @@ function patchInputPaths(
   return { paths };
 }
 
+interface NormalizedPayloadLines {
+  readonly normalized: string;
+  readonly matchLines: readonly string[];
+  readonly lineCount: number;
+  readonly hunkRanges: readonly AgentPatchHunkRange[];
+}
+
 function normalizedPayloadLines(
   payload: string,
   kind: "unified-diff" | "content",
-): { readonly normalized: string; readonly addedLines: readonly string[]; readonly lineCount: number } {
+  changeType: AgentPatchChange["changeType"],
+): NormalizedPayloadLines {
   const normalized = payload.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = normalized.length === 0 ? [] : normalized.split("\n");
-  const addedLines = kind === "unified-diff"
+  const matchLines = kind === "unified-diff"
     ? lines
-      .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+      .filter((line) => changeType === "delete"
+        ? line.startsWith("-") && !line.startsWith("---")
+        : line.startsWith("+") && !line.startsWith("+++"))
       .map((line) => line.slice(1))
     : lines;
-  return { normalized, addedLines, lineCount: lines.length };
+  const hunkRanges = kind === "unified-diff" && changeType === "update"
+    ? lines.flatMap((line) => {
+      const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      if (match === null) {
+        return [];
+      }
+      const oldStart = Number(match[1]);
+      const oldLines = Number(match[2] ?? "1");
+      const newStart = Number(match[3]);
+      const newLines = Number(match[4] ?? "1");
+      if (![oldStart, oldLines, newStart, newLines].every((value) => Number.isSafeInteger(value))) {
+        return [];
+      }
+      return [{
+        oldStart,
+        oldLines,
+        newStart,
+        newLines,
+      }];
+    })
+    : [];
+  return { normalized, matchLines, lineCount: lines.length, hunkRanges };
 }
 
 function recoverPatchChange(
@@ -116,6 +149,9 @@ function recoverPatchChange(
   rawChange: unknown,
   sessionCwd: string | undefined,
 ): AgentPatchChange | undefined {
+  if (sessionCwd === undefined) {
+    return undefined;
+  }
   const pathValue = normalizeEventPath(rawPath, sessionCwd);
   if (pathValue === undefined) {
     return undefined;
@@ -132,10 +168,24 @@ function recoverPatchChange(
   const rawPayload = rawDiff ?? rawContent ?? "";
   const payloadRecovered = rawDiff !== undefined || rawContent !== undefined;
   const bounded = boundPayload(rawPayload);
-  const lineData = normalizedPayloadLines(bounded.text, payloadKind);
-  const lineFingerprints = lineData.addedLines
+  const lineData = normalizedPayloadLines(bounded.text, payloadKind, changeType);
+  const supportsDirectMatch = (changeType === "update" && payloadKind === "unified-diff")
+    || (changeType === "add" && payloadKind === "content")
+    || (changeType === "delete" && payloadKind === "content");
+  const matchSide = changeType === "update" && payloadKind === "unified-diff"
+    ? "added"
+    : changeType === "delete" && payloadKind === "content"
+      ? "deleted"
+      : "content";
+  const matchLineFingerprints = (supportsDirectMatch ? lineData.matchLines : [])
     .slice(0, MAX_PATCH_LINE_FINGERPRINTS)
     .map((line) => digest(line));
+  const distinctiveLineFingerprints = uniqueStrings(
+    (supportsDirectMatch ? lineData.matchLines : [])
+      .slice(0, MAX_PATCH_LINE_FINGERPRINTS)
+      .filter(isDistinctiveLine)
+      .map((line) => digest(line)),
+  );
   const movedFromValue = normalizeEventPath(change.move_path, sessionCwd);
 
   const result: AgentPatchChange = {
@@ -145,7 +195,13 @@ function recoverPatchChange(
     payloadRecovered,
     payloadFingerprint: digest(lineData.normalized),
     payloadTruncated: bounded.truncated,
-    addedLineFingerprints: lineFingerprints,
+    addedLineFingerprints: changeType === "update" || changeType === "add"
+      ? matchLineFingerprints
+      : [],
+    matchLineFingerprints,
+    distinctiveLineFingerprints,
+    matchSide,
+    hunkRanges: supportsDirectMatch ? lineData.hunkRanges : [],
     lineCount: lineData.lineCount,
   };
   return movedFromValue === undefined ? result : { ...result, movedFrom: movedFromValue };
@@ -269,6 +325,7 @@ class EvidenceCollector {
       kind: "git-revision-reference",
       occurredAt: record.timestamp,
       paths: [],
+      commitReferenceKind: "session-head",
       commitIds: [commitHash],
       sourceRecord: record.recordNumber,
     });
@@ -302,7 +359,9 @@ class EvidenceCollector {
 
     if (name === "exec_command") {
       const args = parseJsonArguments(record.payload.arguments, context, record.recordNumber);
-      const workdir = args === undefined ? undefined : normalizeEventCwd(args.workdir, context.session.initialCwd);
+      const workdir = args === undefined
+        ? undefined
+        : normalizeEventCwd(args.workdir, context.effectiveCwd);
       const evidenceIndex = this.addEvidence({
         kind: "command-attempt",
         occurredAt: record.timestamp,
@@ -360,10 +419,11 @@ class EvidenceCollector {
     }
 
     if (name === "apply_patch") {
-      const attempt = patchInputPaths(record.payload.input, context.session.initialCwd);
+      const attempt = patchInputPaths(record.payload.input, context.effectiveCwd);
       const evidenceIndex = this.addEvidence({
         kind: "patch-attempt",
         occurredAt: record.timestamp,
+        ...(context.effectiveCwd === undefined ? {} : { cwd: context.effectiveCwd }),
         paths: attempt.paths,
         operation: "patch",
         callId,
@@ -397,7 +457,8 @@ class EvidenceCollector {
     }
 
     const call = this.calls.get(callId);
-    if (call === undefined || call.operation !== "patch") {
+    const linkedPatch = call?.operation === "patch";
+    if (!linkedPatch) {
       context.addDiagnostic(diagnostic("unlinked-tool-result", record.recordNumber));
     } else {
       this.markCallResult(callId, context, record.recordNumber);
@@ -405,7 +466,7 @@ class EvidenceCollector {
 
     const changes = recoverPatchChanges(
       record.payload.changes,
-      context.session.initialCwd,
+      context.effectiveCwd,
       context,
       record.recordNumber,
     );
@@ -421,10 +482,11 @@ class EvidenceCollector {
     this.addEvidence({
       kind: "patch-result",
       occurredAt: record.timestamp,
+      ...(context.effectiveCwd === undefined ? {} : { cwd: context.effectiveCwd }),
       paths,
       operation: "patch",
       callId,
-      resultRecorded: true,
+      resultRecorded: linkedPatch,
       ...(reportedSuccess === undefined ? {} : { reportedSuccess }),
       ...(status === undefined ? {} : { status }),
       patch,
@@ -460,7 +522,7 @@ class EvidenceCollector {
 
 export async function extractCodexEvidence(
   ref: AgentSessionRef,
-  _target?: CorrelationTarget,
+  _target?: AgentEvidenceTarget,
 ): Promise<AgentEvidenceBundle> {
   const collector = new EvidenceCollector();
   const parsed: ParsedTranscript = await parseTranscript(ref, { onRecord: collector.visit });

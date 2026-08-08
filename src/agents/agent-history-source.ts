@@ -19,11 +19,21 @@ export interface AgentHistoryDiscoveryContext {
   readonly historyRoot?: string;
 }
 
-export interface CorrelationTarget {
+export interface AgentEvidenceTarget {
   readonly repositoryPath?: string;
   readonly line?: number;
   readonly worktreeRoot?: string;
 }
+
+export type AgentHistoryAvailability = "available" | "limited" | "unavailable";
+
+export interface AgentHistoryDiscoveryResult {
+  readonly availability: AgentHistoryAvailability;
+  readonly refs: readonly AgentSessionRef[];
+  readonly diagnostics: readonly AgentDiagnostic[];
+}
+
+export type AgentCommitReferenceKind = "session-head" | "produced-commit" | "unknown";
 
 export interface AgentSessionSummary {
   readonly ref: AgentSessionRef;
@@ -45,6 +55,7 @@ export interface AgentSessionSummary {
   readonly transcriptGit?: {
     readonly branch?: string | undefined;
     readonly commitHash?: string | undefined;
+    readonly referenceKind?: AgentCommitReferenceKind | undefined;
   } | undefined;
   readonly isPartial: boolean;
   readonly diagnostics: readonly AgentDiagnostic[];
@@ -64,6 +75,15 @@ export type AgentOperation =
   | "patch"
   | "mcp";
 
+export interface AgentPatchHunkRange {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+}
+
+export type AgentPatchMatchSide = "added" | "deleted" | "content";
+
 export interface AgentPatchChange {
   readonly path: string;
   readonly changeType: "update" | "add" | "delete" | "unknown";
@@ -74,6 +94,10 @@ export interface AgentPatchChange {
   readonly payloadTruncated: boolean;
   /** Non-reversible per-line digests retained for future hunk comparison. */
   readonly addedLineFingerprints: readonly string[];
+  readonly matchLineFingerprints: readonly string[];
+  readonly distinctiveLineFingerprints: readonly string[];
+  readonly matchSide: AgentPatchMatchSide;
+  readonly hunkRanges: readonly AgentPatchHunkRange[];
   readonly lineCount: number;
   readonly movedFrom?: string | undefined;
 }
@@ -102,6 +126,7 @@ export interface AgentEvidence {
   readonly reportedSuccess?: boolean | undefined;
   readonly status?: string | undefined;
   readonly patch?: AgentPatchEvidence | undefined;
+  readonly commitReferenceKind?: AgentCommitReferenceKind | undefined;
   readonly commitIds: readonly string[];
   readonly extraction: "structured";
   readonly sourceRecord: number;
@@ -144,9 +169,12 @@ export interface AgentHistorySource {
   discover(
     context?: AgentHistoryDiscoveryContext,
   ): AsyncIterable<AgentSessionRef>;
+  discoverWithDiagnostics?(
+    context?: AgentHistoryDiscoveryContext,
+  ): Promise<AgentHistoryDiscoveryResult>;
   readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary>;
   extractEvidence(
     ref: AgentSessionRef,
-    target?: CorrelationTarget,
+    target?: AgentEvidenceTarget,
   ): Promise<AgentEvidenceBundle>;
 }

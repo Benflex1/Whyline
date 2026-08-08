@@ -15,6 +15,7 @@ import {
   parseTranscript,
   readCodexSummary,
 } from "../src/agents/codex/index.js";
+import { isDistinctiveLine } from "../src/agents/codex/safe.js";
 
 const fixtureRoot = path.resolve(process.cwd(), "test/fixtures/codex");
 
@@ -115,9 +116,41 @@ test("discovery is recursive, metadata-only, filename-independent, and archive-o
   assert.deepEqual(historyBundle.evidence, []);
   assert.ok(historyBundle.diagnostics.some((item) => item.kind === "unsupported-source"));
 
-  const sourceWithoutArchive = await discoverCodexSources({ codexHome: path.join(home, "missing-archive-home") });
-  assert.deepEqual(sourceWithoutArchive.refs, []);
+  const archiveOptionalHome = await temporaryDirectory(t);
+  const archiveOptionalSessions = path.join(archiveOptionalHome, "sessions", "2026", "08", "08");
+  await mkdir(archiveOptionalSessions, { recursive: true });
+  await copyFile(
+    fixturePath("rollout-cli-v0.142.5.jsonl"),
+    path.join(archiveOptionalSessions, "active-only.jsonl"),
+  );
+  const sourceWithoutArchive = await discoverCodexSources({ codexHome: archiveOptionalHome });
+  assert.equal(sourceWithoutArchive.availability, "available");
+  assert.equal(sourceWithoutArchive.refs.length, 1);
   assert.deepEqual(sourceWithoutArchive.diagnostics, []);
+
+  const missingHome = await discoverCodexSources({ codexHome: path.join(home, "missing-home") });
+  assert.deepEqual(missingHome.refs, []);
+  assert.equal(missingHome.availability, "unavailable");
+
+  const partiallyUnreadableHome = await temporaryDirectory(t);
+  await writeFile(path.join(partiallyUnreadableHome, "sessions"), "not a directory\n", "utf8");
+  const readableArchivedSessions = path.join(partiallyUnreadableHome, "archived_sessions", "2026", "08", "08");
+  await mkdir(readableArchivedSessions, { recursive: true });
+  await copyFile(
+    fixturePath("rollout-subagent-v0.147.0.jsonl"),
+    path.join(readableArchivedSessions, "readable-archive.jsonl"),
+  );
+  const partiallyUnreadable = await discoverCodexSources({ codexHome: partiallyUnreadableHome });
+  assert.equal(partiallyUnreadable.availability, "limited");
+  assert.equal(partiallyUnreadable.refs.length, 1);
+  assert.equal(partiallyUnreadable.refs[0]?.sourceKind, "archived");
+  assert.ok(partiallyUnreadable.diagnostics.some((item) => item.kind === "unreadable-transcript"));
+
+  const emptyHome = await temporaryDirectory(t);
+  const emptyReadable = await discoverCodexSources({ codexHome: emptyHome });
+  assert.equal(emptyReadable.availability, "available");
+  assert.deepEqual(emptyReadable.refs, []);
+  assert.deepEqual(emptyReadable.diagnostics, []);
 });
 
 test("CLI/TUI summary uses session metadata and observed-through time", async (t) => {
@@ -144,6 +177,7 @@ test("T3 and subagent summaries preserve observed fields without repository URLs
   assert.equal(t3.source, "vscode");
   assert.equal(t3.transcriptGit?.branch, "main");
   assert.equal(t3.transcriptGit?.commitHash, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  assert.equal(t3.transcriptGit?.referenceKind, "session-head");
   assert.equal(t3.observedThroughAt, "2026-08-08T01:35:00.000Z");
   assert.doesNotMatch(JSON.stringify(t3), /repository_url|example\.invalid/);
   assert.doesNotMatch(JSON.stringify(t3), /synthetic/);
@@ -231,9 +265,48 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.equal(results[0]?.patch?.changes[0]?.addedLineFingerprints.length, 1);
   assert.equal(results[0]?.patch?.changes[0]?.payloadFingerprint.length, 64);
   assert.equal(revisions[0]?.commitIds[0], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  assert.equal(revisions[0]?.commitReferenceKind, "session-head");
+  assert.equal(revisions.some((item) => item.commitReferenceKind === "produced-commit"), false);
   assert.ok(bundle.diagnostics.some((item) => item.kind === "compacted-history"));
   assert.ok(bundle.diagnostics.some((item) => item.kind === "context-compaction"));
   assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);
+});
+
+test("unlinked patch completion retains structured audit evidence without result linkage", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const sourcePath = await writeTranscript(directory, "unlinked-patch-result.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "command-item",
+      call_id: "call-command",
+      name: "exec",
+      input: "opaque command text",
+    }),
+    eventRecord({
+      type: "patch_apply_end",
+      call_id: "call-command",
+      status: "completed",
+      success: true,
+      changes: {
+        "/home/alice/projects/example/src/orphan.ts": {
+          type: "update",
+          unified_diff: [
+            "@@ -1,0 +1,2 @@",
+            "+const orphanFirst = true;",
+            "+const orphanSecond = false;",
+          ].join("\n"),
+        },
+      },
+    }),
+  ]);
+
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const result = evidenceOf(bundle, "patch-result")[0];
+  assert.equal(result?.resultRecorded, false);
+  assert.equal(result?.reportedSuccess, true);
+  assert.equal(result?.patch?.changes[0]?.payloadRecovered, true);
+  assert.ok(bundle.diagnostics.some((item) => item.kind === "unlinked-tool-result"));
 });
 
 test("failed patch and update/add/delete change payloads remain separate from success", async (t) => {
@@ -282,6 +355,153 @@ test("failed patch and update/add/delete change payloads remain separate from su
   );
   assert.ok(result?.patch?.changes.every((change) => change.payloadRecovered));
   assert.doesNotMatch(JSON.stringify(bundle), /SECRET_ADDED_SOURCE|SECRET_DELETED_SOURCE|old|new/);
+});
+
+test("structured patch evidence normalizes operation sides, ranges, truncation, and distinctiveness", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const oversizedContent = `SECRET_TRUNCATED_SOURCE\nconst truncatedFirst = true;\nconst truncatedSecond = false;\n${"const retainedLine = true;\n".repeat(20_000)}`;
+  const sourcePath = await writeTranscript(directory, "task-2-patch-contract.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "task-2-patch-attempt",
+      call_id: "call-task-2-patch",
+      name: "apply_patch",
+      input: "SECRET_RAW_PATCH_INPUT",
+    }),
+    eventRecord({
+      type: "patch_apply_end",
+      call_id: "call-task-2-patch",
+      success: true,
+      status: "completed",
+      changes: {
+        "/home/alice/projects/example/src/update.ts": {
+          type: "update",
+          unified_diff: [
+            "@@ -10,2 +20,4 @@ private secret context",
+            "-removed secret source",
+            "+{",
+            "+const firstMeaningful = true;",
+            "+const secondMeaningful = false;",
+            "+}",
+          ].join("\r\n"),
+        },
+        "/home/alice/projects/example/src/add.ts": {
+          type: "add",
+          content: "{\r\nconst addedFirst = true;\r\nconst addedSecond = false;\r\n}\r\n",
+        },
+        "/home/alice/projects/example/src/delete.ts": {
+          type: "delete",
+          content: "{\nconst deletedFirst = true;\nconst deletedSecond = false;\n}\n",
+        },
+        "/home/alice/projects/example/src/truncated.ts": {
+          type: "add",
+          content: oversizedContent,
+        },
+        "/home/alice/projects/example/src/unsupported-add-diff.ts": {
+          type: "add",
+          unified_diff: "@@ -1 +1 @@\n+const unsupportedAddDiff = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-update-content.ts": {
+          type: "update",
+          content: "const unsupportedUpdateContent = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-delete-diff.ts": {
+          type: "delete",
+          unified_diff: "@@ -1 +0,0 @@\n-const unsupportedDeleteDiff = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-unknown-content.ts": {
+          type: "rename",
+          content: "const unsupportedUnknownContent = true;\n",
+        },
+      },
+    }),
+  ]);
+
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const result = evidenceOf(bundle, "patch-result")[0];
+  assert.ok(result?.patch);
+  const changes = result.patch.changes;
+  assert.equal(changes.length, 8);
+
+  const update = changes[0];
+  assert.equal(update?.matchSide, "added");
+  assert.deepEqual(update?.hunkRanges, [{ oldStart: 10, oldLines: 2, newStart: 20, newLines: 4 }]);
+  assert.deepEqual(update?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "f0201a8fbeb9c7e8240df84401f22f9509fa9aa16d6dc21f7505c7c678530623",
+    "939d37b3e01edd579b15fed2f3e5719849479e01e5a4d2e43b2bb0ce7ed0dc74",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+  ]);
+  assert.deepEqual(update?.addedLineFingerprints, update?.matchLineFingerprints);
+  assert.deepEqual(update?.distinctiveLineFingerprints, [
+    "f0201a8fbeb9c7e8240df84401f22f9509fa9aa16d6dc21f7505c7c678530623",
+    "939d37b3e01edd579b15fed2f3e5719849479e01e5a4d2e43b2bb0ce7ed0dc74",
+  ]);
+
+  const added = changes[1];
+  assert.equal(added?.matchSide, "content");
+  assert.deepEqual(added?.hunkRanges, []);
+  assert.deepEqual(added?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "9425421c0be371e4aed35b8f35b003fccf84bd0f86f4d2a50d59d76930fa4aeb",
+    "fc6f59038ce3982b857464179a9bf44dfe80ecd01618b4d22ee39b8e1b50b8d8",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  ]);
+  assert.deepEqual(added?.addedLineFingerprints, added?.matchLineFingerprints);
+  assert.deepEqual(added?.distinctiveLineFingerprints, [
+    "9425421c0be371e4aed35b8f35b003fccf84bd0f86f4d2a50d59d76930fa4aeb",
+    "fc6f59038ce3982b857464179a9bf44dfe80ecd01618b4d22ee39b8e1b50b8d8",
+  ]);
+
+  const deleted = changes[2];
+  assert.equal(deleted?.matchSide, "deleted");
+  assert.deepEqual(deleted?.hunkRanges, []);
+  assert.deepEqual(deleted?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "59e7327cfdb0fbd745389358f8e19666299c92110eeefbd209be3716806a771b",
+    "5aeb4fcb228c4f0d08de9c5cc86026585b2cc175dd8a0ef45448182d5165ebda",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  ]);
+  assert.deepEqual(deleted?.addedLineFingerprints, []);
+  assert.deepEqual(deleted?.distinctiveLineFingerprints, [
+    "59e7327cfdb0fbd745389358f8e19666299c92110eeefbd209be3716806a771b",
+    "5aeb4fcb228c4f0d08de9c5cc86026585b2cc175dd8a0ef45448182d5165ebda",
+  ]);
+
+  const truncated = changes[3];
+  assert.equal(truncated?.payloadTruncated, true);
+  assert.ok((truncated?.matchLineFingerprints.length ?? 0) <= 128);
+  assert.ok((truncated?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  const unsupported = changes.slice(4);
+  assert.equal(unsupported.length, 4);
+  assert.ok(unsupported.every((change) => change.payloadRecovered));
+  assert.ok(unsupported.every((change) => change.matchLineFingerprints.length === 0));
+  assert.ok(unsupported.every((change) => change.distinctiveLineFingerprints.length === 0));
+  assert.ok(unsupported.every((change) => change.hunkRanges.length === 0));
+  assert.ok(unsupported.every((change) => change.addedLineFingerprints.length === 0));
+  assert.doesNotMatch(
+    JSON.stringify(bundle),
+    /SECRET_RAW_PATCH_INPUT|SECRET_TRUNCATED_SOURCE|private secret context|removed secret source|firstMeaningful|secondMeaningful|addedFirst|addedSecond|deletedFirst|deletedSecond|truncatedFirst|truncatedSecond|retainedLine|unsupportedAddDiff|unsupportedUpdateContent|unsupportedDeleteDiff|unsupportedUnknownContent/,
+  );
+});
+
+test("distinctive line classification rejects weak and boilerplate lines", () => {
+  const weakLines = [
+    "",
+    "abc",
+    "identifierOnly",
+    "{}",
+    "---",
+    "return value;",
+    "throw error;",
+    "yield result;",
+    "return;",
+  ];
+  assert.ok(weakLines.every((line) => !isDistinctiveLine(line)));
+  assert.equal(isDistinctiveLine("const meaningfulValue = true;"), true);
 });
 
 test("unknown, compaction, rollback, abort, and unlinked results become diagnostics", async (t) => {
@@ -440,6 +660,10 @@ test("agent source exposes only the staged discovery, summary, and evidence oper
     refs.push(ref);
   }
   assert.equal(refs.length, 1);
+  const diagnosticDiscovery = await source.discoverWithDiagnostics({ historyRoot: home });
+  assert.equal(diagnosticDiscovery.availability, "available");
+  assert.equal(diagnosticDiscovery.refs.length, 1);
+  assert.deepEqual(diagnosticDiscovery.diagnostics, []);
   assert.equal((await source.readSummary(refs[0]!)).sessionId, "example-session");
   assert.equal((await source.extractEvidence(refs[0]!)).session.sessionId, "example-session");
 });

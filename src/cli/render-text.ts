@@ -4,6 +4,7 @@ import type {
   GitPathChange,
   WhylineReport,
 } from "../provenance/model.js";
+import { renderCorrelation } from "./render-correlation.js";
 
 const MAX_RENDERED_CHANGES = 24;
 const MAX_RENDERED_HUNK_LINES = 28;
@@ -152,6 +153,9 @@ export function renderText(report: WhylineReport): string {
   output.push("", "Limitations");
   for (const limitation of [...new Set(provenance.limitations)]) {
     output.push(`  ${sanitizeTerminalText(limitation)}`);
+  }
+  if (provenance.state === "committed" && report.correlation !== undefined) {
+    output.push("", ...renderCorrelation(report.correlation).split("\n"));
   }
   return output.join("\n");
 }

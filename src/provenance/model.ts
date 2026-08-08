@@ -1,3 +1,5 @@
+import type { CorrelationResult } from "../correlation/model.js";
+
 export type ClaimBasis = "fact" | "derived" | "inferred";
 
 export type TargetFileState =
@@ -165,4 +167,5 @@ export interface WhylineReport {
   readonly repository: RepositoryContext;
   readonly location: ResolvedCodeLocation;
   readonly provenance: GitProvenance;
+  readonly correlation?: CorrelationResult;
 }

@@ -117,7 +117,13 @@ test("discovery is recursive, metadata-only, filename-independent, and archive-o
 
   const sourceWithoutArchive = await discoverCodexSources({ codexHome: path.join(home, "missing-archive-home") });
   assert.deepEqual(sourceWithoutArchive.refs, []);
-  assert.deepEqual(sourceWithoutArchive.diagnostics, []);
+  assert.equal(sourceWithoutArchive.availability, "unavailable");
+
+  const emptyHome = await temporaryDirectory(t);
+  const emptyReadable = await discoverCodexSources({ codexHome: emptyHome });
+  assert.equal(emptyReadable.availability, "available");
+  assert.deepEqual(emptyReadable.refs, []);
+  assert.deepEqual(emptyReadable.diagnostics, []);
 });
 
 test("CLI/TUI summary uses session metadata and observed-through time", async (t) => {
@@ -144,6 +150,7 @@ test("T3 and subagent summaries preserve observed fields without repository URLs
   assert.equal(t3.source, "vscode");
   assert.equal(t3.transcriptGit?.branch, "main");
   assert.equal(t3.transcriptGit?.commitHash, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  assert.equal(t3.transcriptGit?.referenceKind, "session-head");
   assert.equal(t3.observedThroughAt, "2026-08-08T01:35:00.000Z");
   assert.doesNotMatch(JSON.stringify(t3), /repository_url|example\.invalid/);
   assert.doesNotMatch(JSON.stringify(t3), /synthetic/);
@@ -231,6 +238,7 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.equal(results[0]?.patch?.changes[0]?.addedLineFingerprints.length, 1);
   assert.equal(results[0]?.patch?.changes[0]?.payloadFingerprint.length, 64);
   assert.equal(revisions[0]?.commitIds[0], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+  assert.equal(revisions[0]?.commitReferenceKind, "session-head");
   assert.ok(bundle.diagnostics.some((item) => item.kind === "compacted-history"));
   assert.ok(bundle.diagnostics.some((item) => item.kind === "context-compaction"));
   assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);

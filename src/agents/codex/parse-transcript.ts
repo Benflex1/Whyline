@@ -132,7 +132,11 @@ class SummaryBuilder {
   private model: string | undefined;
   private parentSessionId: string | undefined;
   private forkedFromSessionId: string | undefined;
-  private transcriptGit: { branch?: string; commitHash?: string } | undefined;
+  private transcriptGit: {
+    branch?: string;
+    commitHash?: string;
+    referenceKind?: "session-head";
+  } | undefined;
   private partial = false;
   private readonly diagnostics: AgentDiagnostic[] = [];
 
@@ -302,6 +306,7 @@ class SummaryBuilder {
       ...(this.transcriptGit ?? {}),
       ...(branch === undefined ? {} : { branch }),
       ...(commitHash === undefined ? {} : { commitHash }),
+      ...(commitHash === undefined ? {} : { referenceKind: "session-head" as const }),
     };
   }
 

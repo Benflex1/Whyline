@@ -5,6 +5,7 @@ import path from "node:path";
 
 import type {
   AgentDiagnostic,
+  AgentHistoryDiscoveryResult,
   AgentHistoryDiscoveryContext,
   AgentSessionRef,
 } from "../agent-history-source.js";
@@ -16,10 +17,8 @@ export interface CodexDiscoveryOptions {
   readonly homeDirectory?: string;
 }
 
-export interface CodexDiscoveryResult {
+export interface CodexDiscoveryResult extends AgentHistoryDiscoveryResult {
   readonly home: string;
-  readonly refs: readonly AgentSessionRef[];
-  readonly diagnostics: readonly AgentDiagnostic[];
 }
 
 export function resolveCodexHome(options: CodexDiscoveryOptions = {}): string {
@@ -43,23 +42,24 @@ async function collectJsonlFiles(
   sourceKind: "active" | "archived",
   refs: AgentSessionRef[],
   diagnostics: AgentDiagnostic[],
-): Promise<void> {
+): Promise<boolean> {
   let entries;
   try {
     entries = await readdir(root, { withFileTypes: true });
   } catch (error: unknown) {
     if (isMissing(error)) {
-      return;
+      return false;
     }
     diagnostics.push(diagnostic("unreadable-transcript", undefined, `${sourceKind} store unavailable`));
-    return;
+    return true;
   }
 
+  let limited = false;
   entries.sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
     const entryPath = path.join(root, entry.name);
     if (entry.isDirectory()) {
-      await collectJsonlFiles(entryPath, sourceKind, refs, diagnostics);
+      limited = (await collectJsonlFiles(entryPath, sourceKind, refs, diagnostics)) || limited;
       continue;
     }
 
@@ -75,9 +75,11 @@ async function collectJsonlFiles(
       }
       refs.push({ adapterId: "codex", sourcePath: entryPath, sourceKind });
     } catch {
+      limited = true;
       diagnostics.push(diagnostic("unreadable-transcript", undefined, `${sourceKind} transcript unavailable`));
     }
   }
+  return limited;
 }
 
 export async function discoverCodexSources(
@@ -87,11 +89,27 @@ export async function discoverCodexSources(
   const refs: AgentSessionRef[] = [];
   const diagnostics: AgentDiagnostic[] = [];
 
-  await collectJsonlFiles(path.join(home, "sessions"), "active", refs, diagnostics);
-  await collectJsonlFiles(path.join(home, "archived_sessions"), "archived", refs, diagnostics);
+  try {
+    await access(home, constants.R_OK);
+    const metadata = await stat(home);
+    if (!metadata.isDirectory()) {
+      throw new Error("Codex home is not a directory");
+    }
+  } catch {
+    diagnostics.push(diagnostic("unreadable-transcript", undefined, "Codex home unavailable"));
+    return { home, availability: "unavailable", refs, diagnostics };
+  }
+
+  const activeLimited = await collectJsonlFiles(path.join(home, "sessions"), "active", refs, diagnostics);
+  const archivedLimited = await collectJsonlFiles(path.join(home, "archived_sessions"), "archived", refs, diagnostics);
   refs.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath));
 
-  return { home, refs, diagnostics };
+  return {
+    home,
+    availability: activeLimited || archivedLimited ? "limited" : "available",
+    refs,
+    diagnostics,
+  };
 }
 
 export async function* discoverCodexTranscripts(

@@ -4,7 +4,7 @@ import type {
   AgentHistorySource,
   AgentSessionRef,
   AgentSessionSummary,
-  CorrelationTarget,
+  AgentEvidenceTarget,
 } from "../agent-history-source.js";
 import {
   discoverCodexSources,
@@ -47,7 +47,7 @@ export class CodexHistorySource implements AgentHistorySource {
 
   public extractEvidence(
     ref: AgentSessionRef,
-    target?: CorrelationTarget,
+    target?: AgentEvidenceTarget,
   ): Promise<AgentEvidenceBundle> {
     return extractCodexEvidence(ref, target);
   }

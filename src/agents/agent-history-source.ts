@@ -19,11 +19,21 @@ export interface AgentHistoryDiscoveryContext {
   readonly historyRoot?: string;
 }
 
-export interface CorrelationTarget {
+export interface AgentEvidenceTarget {
   readonly repositoryPath?: string;
   readonly line?: number;
   readonly worktreeRoot?: string;
 }
+
+export type AgentHistoryAvailability = "available" | "limited" | "unavailable";
+
+export interface AgentHistoryDiscoveryResult {
+  readonly availability: AgentHistoryAvailability;
+  readonly refs: readonly AgentSessionRef[];
+  readonly diagnostics: readonly AgentDiagnostic[];
+}
+
+export type AgentCommitReferenceKind = "session-head" | "produced-commit" | "unknown";
 
 export interface AgentSessionSummary {
   readonly ref: AgentSessionRef;
@@ -45,6 +55,7 @@ export interface AgentSessionSummary {
   readonly transcriptGit?: {
     readonly branch?: string | undefined;
     readonly commitHash?: string | undefined;
+    readonly referenceKind?: AgentCommitReferenceKind | undefined;
   } | undefined;
   readonly isPartial: boolean;
   readonly diagnostics: readonly AgentDiagnostic[];
@@ -102,6 +113,7 @@ export interface AgentEvidence {
   readonly reportedSuccess?: boolean | undefined;
   readonly status?: string | undefined;
   readonly patch?: AgentPatchEvidence | undefined;
+  readonly commitReferenceKind?: AgentCommitReferenceKind | undefined;
   readonly commitIds: readonly string[];
   readonly extraction: "structured";
   readonly sourceRecord: number;
@@ -144,9 +156,12 @@ export interface AgentHistorySource {
   discover(
     context?: AgentHistoryDiscoveryContext,
   ): AsyncIterable<AgentSessionRef>;
+  discoverWithDiagnostics?(
+    context?: AgentHistoryDiscoveryContext,
+  ): Promise<AgentHistoryDiscoveryResult>;
   readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary>;
   extractEvidence(
     ref: AgentSessionRef,
-    target?: CorrelationTarget,
+    target?: AgentEvidenceTarget,
   ): Promise<AgentEvidenceBundle>;
 }

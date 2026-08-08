@@ -4,7 +4,7 @@ import type {
   AgentOperation,
   AgentPatchChange,
   AgentSessionRef,
-  CorrelationTarget,
+  AgentEvidenceTarget,
 } from "../agent-history-source.js";
 import {
   boundPayload,
@@ -269,6 +269,7 @@ class EvidenceCollector {
       kind: "git-revision-reference",
       occurredAt: record.timestamp,
       paths: [],
+      commitReferenceKind: "session-head",
       commitIds: [commitHash],
       sourceRecord: record.recordNumber,
     });
@@ -460,7 +461,7 @@ class EvidenceCollector {
 
 export async function extractCodexEvidence(
   ref: AgentSessionRef,
-  _target?: CorrelationTarget,
+  _target?: AgentEvidenceTarget,
 ): Promise<AgentEvidenceBundle> {
   const collector = new EvidenceCollector();
   const parsed: ParsedTranscript = await parseTranscript(ref, { onRecord: collector.visit });

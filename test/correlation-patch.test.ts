@@ -292,6 +292,24 @@ test("tracks update divergence by supplied record order and hunk locality", () =
   );
 });
 
+test("supersedes divergent old-path updates with later matching rename-connected updates", () => {
+  const oldPath = "src/old.ts";
+  const newPath = "src/new.ts";
+  const renameTarget = target({
+    targetPath: newPath,
+    changedPaths: [{ oldPath, newPath }],
+    relevantHunks: [hunk({ oldPath, newPath })],
+  });
+  const divergent = change({
+    path: oldPath,
+    distinctiveLineFingerprints: ["unrelated-one", "unrelated-two"],
+    matchLineFingerprints: ["unrelated-one", "unrelated-two"],
+  });
+  const matching = change({ path: newPath });
+
+  assert.equal(hasCompetingStructuredDivergence(renameTarget, [divergent, matching]), false);
+});
+
 test("suppresses absence-based divergence when a relevant Git hunk is truncated", () => {
   const competing = change({
     distinctiveLineFingerprints: ["unrelated-one", "unrelated-two"],

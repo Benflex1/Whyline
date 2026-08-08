@@ -263,9 +263,8 @@ function sharesTargetPath(
   second: AgentPatchChange,
 ): boolean {
   const acceptedPaths = targetPaths(target);
-  const firstPaths = changePaths(first);
-  const secondPaths = new Set(changePaths(second));
-  return firstPaths.some((value) => acceptedPaths.has(value) && secondPaths.has(value));
+  return [first, second].every((change) =>
+    changePaths(change).some((value) => acceptedPaths.has(value)));
 }
 
 export function hasCompetingStructuredDivergence(

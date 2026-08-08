@@ -522,6 +522,7 @@ test("ineligible material limitations remain global coverage blockers", () => {
   );
 
   assert.equal(result.status, "none");
+  assert.equal(result.coverage.status, "limited");
   assert.equal(result.coverage.limitations.some((limitation) => limitation.kind === "unresolved-repository-candidate"), true);
   assert.equal(result.coverage.limitations.some((limitation) => limitation.kind === "unsupported-summary"), true);
 });

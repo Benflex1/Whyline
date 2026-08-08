@@ -47,7 +47,13 @@ function coverageWithCandidateLimitations(
   for (const input of inputs) {
     for (const limitation of input.coverageLimitations) add(limitation);
   }
-  return { ...coverage, limitations: [...limitations.values()] };
+  const mergedLimitations = [...limitations.values()];
+  const status = coverage.status === "unavailable"
+    ? "unavailable"
+    : mergedLimitations.some((limitation) => limitation.material)
+      ? "limited"
+      : coverage.status;
+  return { ...coverage, status, limitations: mergedLimitations };
 }
 
 function sufficientCoverage(

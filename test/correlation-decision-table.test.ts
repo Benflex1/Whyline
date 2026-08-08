@@ -20,6 +20,7 @@ import { correlate } from "../src/correlation/correlate.js";
 import { scoreCandidate } from "../src/correlation/score-candidate.js";
 
 const targetPath = "src/target.ts";
+const otherPath = "src/other.ts";
 const sessionHead = "0123456789abcdef0123456789abcdef01234567";
 const unrelatedCommit = "fedcba9876543210fedcba9876543210fedcba98";
 
@@ -270,6 +271,17 @@ test("candidate decision table assigns conservative bands and typed signals", ()
       contradiction: false,
     },
     {
+      name: "unknown repository plus session-head and path evidence",
+      candidate: {
+        repositoryMatch: "unknown",
+        references: [reference()],
+        evidence: evidenceBundle([patchEvidence([patchChange({ distinctiveLineFingerprints: ["line-a"], matchLineFingerprints: ["line-a"] })])]),
+      },
+      band: "weak",
+      requiredSignals: ["session-head-target-reference", "structured-patch-target-path"],
+      contradiction: false,
+    },
+    {
       name: "filename and time only",
       candidate: {
         evidence: evidenceBundle([{
@@ -337,6 +349,33 @@ test("candidate decision table assigns conservative bands and typed signals", ()
     assert.equal(candidate.contradictions.length > 0, row.contradiction, row.name);
     assert.equal(candidate.signals.some((signal) => "prompt" in signal || "command" in signal || "output" in signal), false, row.name);
   }
+});
+
+test("changed-path overlap is independent from target-path overlap", () => {
+  const changedFileOnly = scoreCandidate(
+    target({
+      changedPaths: [
+        { oldPath: targetPath, newPath: targetPath },
+        { oldPath: otherPath, newPath: otherPath },
+      ],
+    }),
+    input({
+      evidence: evidenceBundle([patchEvidence([patchChange({ path: otherPath })])]),
+    }),
+  );
+
+  assert.equal(changedFileOnly.signals.some((signal) => signal.kind === "changed-path-overlap"), true);
+  assert.equal(changedFileOnly.signals.some((signal) => signal.kind === "structured-patch-target-path"), false);
+  assert.equal(changedFileOnly.band, "plausible");
+});
+
+test("ambiguous commit references do not become historical context", () => {
+  const candidate = scored({
+    evidence: null,
+    references: [reference({ resolution: "ambiguous" })],
+  });
+
+  assert.equal(candidate.signals.some((signal) => signal.kind === "historical-commit-reference"), false);
 });
 
 test("chronology table suppresses superseded divergence and preserves later contradiction", () => {
@@ -459,4 +498,30 @@ test("operation and coverage table gates direct overlap and final selection", ()
       assert.equal(result.selected, undefined, row.name);
     }
   }
+});
+
+test("ineligible material limitations remain global coverage blockers", () => {
+  const unresolved = buildCandidateInput({
+    session: session({ sessionId: "unresolved" }),
+    evidence: null,
+    repositoryMatch: "unknown",
+    references: [],
+  });
+  const unsupported = buildCandidateInput({
+    session: session({ sessionId: null }),
+    evidence: null,
+    repositoryMatch: "incompatible",
+    references: [],
+  });
+  const strong = input({ session: session({ sessionId: "strong" }) });
+
+  const result = correlate(
+    target(),
+    [strong, unresolved, unsupported],
+    coverage({ discoveredRefs: 3, summaryEligibleRefs: 1, fullyExtractedRefs: 1 }),
+  );
+
+  assert.equal(result.status, "none");
+  assert.equal(result.coverage.limitations.some((limitation) => limitation.kind === "unresolved-repository-candidate"), true);
+  assert.equal(result.coverage.limitations.some((limitation) => limitation.kind === "unsupported-summary"), true);
 });

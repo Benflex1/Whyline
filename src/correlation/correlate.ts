@@ -2,6 +2,7 @@ import type {
   CorrelationCandidate,
   CorrelationCandidateInput,
   CorrelationCoverage,
+  CorrelationLimitation,
   CorrelationResult,
   CorrelationTarget,
 } from "./model.js";
@@ -17,6 +18,36 @@ function compareCandidates(left: CorrelationCandidate, right: CorrelationCandida
 
 function visibleCandidates(candidates: readonly CorrelationCandidate[]): readonly CorrelationCandidate[] {
   return candidates.filter((candidate) => candidate.band !== "weak");
+}
+
+function mergeLimitations(
+  left: CorrelationLimitation,
+  right: CorrelationLimitation,
+): CorrelationLimitation {
+  const count = (left.count ?? 0) + (right.count ?? 0);
+  return count === 0
+    ? { kind: left.kind, material: left.material || right.material }
+    : { kind: left.kind, material: left.material || right.material, count };
+}
+
+function coverageWithCandidateLimitations(
+  coverage: CorrelationCoverage,
+  inputs: readonly CorrelationCandidateInput[],
+): CorrelationCoverage {
+  const limitations = new Map<CorrelationLimitation["kind"], CorrelationLimitation>();
+  const add = (limitation: CorrelationLimitation): void => {
+    const existing = limitations.get(limitation.kind);
+    limitations.set(
+      limitation.kind,
+      existing === undefined ? limitation : mergeLimitations(existing, limitation),
+    );
+  };
+
+  for (const limitation of coverage.limitations) add(limitation);
+  for (const input of inputs) {
+    for (const limitation of input.coverageLimitations) add(limitation);
+  }
+  return { ...coverage, limitations: [...limitations.values()] };
 }
 
 function sufficientCoverage(
@@ -38,11 +69,12 @@ export function correlate(
   inputs: readonly CorrelationCandidateInput[],
   coverage: CorrelationCoverage,
 ): CorrelationResult {
-  if (coverage.status === "unavailable") {
+  const effectiveCoverage = coverageWithCandidateLimitations(coverage, inputs);
+  if (effectiveCoverage.status === "unavailable") {
     return {
       status: "unavailable",
       alternatives: [],
-      coverage,
+      coverage: effectiveCoverage,
     };
   }
 
@@ -54,22 +86,22 @@ export function correlate(
   const alternatives = visibleCandidates(candidates);
 
   if (strong.length >= 2) {
-    return { status: "ambiguous", alternatives, coverage };
+    return { status: "ambiguous", alternatives, coverage: effectiveCoverage };
   }
 
   const onlyStrong = strong[0];
-  if (onlyStrong !== undefined && sufficientCoverage(target, candidates, coverage)) {
+  if (onlyStrong !== undefined && sufficientCoverage(target, candidates, effectiveCoverage)) {
     return {
       status: "matched",
       selected: onlyStrong,
       alternatives: alternatives.filter((candidate) => candidate !== onlyStrong),
-      coverage,
+      coverage: effectiveCoverage,
     };
   }
 
   return {
     status: "none",
     alternatives,
-    coverage,
+    coverage: effectiveCoverage,
   };
 }

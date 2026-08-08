@@ -69,6 +69,21 @@ function targetRelatedPaths(target: CorrelationTarget): ReadonlySet<string> {
   return paths;
 }
 
+function changedCommitPaths(target: CorrelationTarget): ReadonlySet<string> {
+  const paths = new Set<string>();
+  for (const changedPath of target.changedPaths) {
+    if (changedPath.oldPath !== null) paths.add(changedPath.oldPath);
+    if (changedPath.newPath !== null) paths.add(changedPath.newPath);
+  }
+  return paths;
+}
+
+function changePaths(change: AgentPatchChange): readonly string[] {
+  return change.movedFrom === undefined
+    ? [change.path]
+    : [change.path, change.movedFrom];
+}
+
 function patchRecords(bundle: AgentEvidenceBundle | null): readonly PatchRecord[] {
   if (bundle === null) return [];
   const records: PatchRecord[] = [];
@@ -103,7 +118,8 @@ function hasTargetReference(
 function hasHistoricalReference(input: CorrelationCandidateInput): boolean {
   return input.references.some((reference) =>
     reference.kind === "session-head"
-      && reference.resolution !== "target");
+      && reference.resolution !== "target"
+      && reference.resolution !== "ambiguous");
 }
 
 function temporalDistanceMs(
@@ -228,17 +244,23 @@ function overlapSignals(
   const directEvidenceIds: string[] = [];
   const targetPathEvidenceIds: string[] = [];
   const changedPathEvidenceIds: string[] = [];
+  const changedPaths = changedCommitPaths(target);
+
   for (const record of records) {
     const overlap: PatchOverlap = comparePatchChangeToHunks(target, record.change);
-    if (!overlap.operationCompatible || !overlap.pathMatched
-      || !record.change.payloadRecovered || record.change.payloadTruncated) continue;
-    targetPathMatched = true;
-    targetPathEvidenceIds.push(record.evidence.id);
-    changedPathMatched = true;
-    changedPathEvidenceIds.push(record.evidence.id);
     if (overlap.direct) {
       directRecords.push(record);
       directEvidenceIds.push(record.evidence.id);
+    }
+    if (!overlap.operationCompatible || !record.change.payloadRecovered
+      || record.change.payloadTruncated) continue;
+    if (overlap.pathMatched) {
+      targetPathMatched = true;
+      targetPathEvidenceIds.push(record.evidence.id);
+    }
+    if (changePaths(record.change).some((pathValue) => changedPaths.has(pathValue))) {
+      changedPathMatched = true;
+      changedPathEvidenceIds.push(record.evidence.id);
     }
   }
 
@@ -357,6 +379,8 @@ function confidenceBand(
     && (credibleRepository || (historicalContext && anchored))) {
     return "strong";
   }
+
+  if (!credibleRepository) return "weak";
 
   const families = supportFamilies(signals);
   return families.size >= 2 && hasQualifiedPatchSignal(signals)

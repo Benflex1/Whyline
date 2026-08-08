@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -67,6 +67,15 @@ async function fixture(t: test.TestContext): Promise<Fixture> {
 async function commitTarget(fixtureValue: Fixture): Promise<string> {
   await runGit(fixtureValue, ["add", "--", "src-target.ts"]);
   await runGit(fixtureValue, ["commit", "--no-verify", "-m", "add target"]);
+  return (await runGit(fixtureValue, ["rev-parse", "HEAD"])).toString("utf8").trim();
+}
+
+async function commitPath(
+  fixtureValue: Fixture,
+  repositoryPath: string,
+): Promise<string> {
+  await runGit(fixtureValue, ["add", "--", repositoryPath]);
+  await runGit(fixtureValue, ["commit", "--no-verify", "-m", "add path"]);
   return (await runGit(fixtureValue, ["rev-parse", "HEAD"])).toString("utf8").trim();
 }
 
@@ -308,6 +317,55 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   assert.equal(serializedCorrelation.includes("synthetic-home"), false);
 });
 
+test("rebases evidence paths from a nested historical session cwd", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const nestedFirstSignal = \"alpha\";";
+  const secondLine = "const nestedSecondSignal = \"beta\";";
+  await mkdir(path.join(f.directory, "src"), { recursive: true });
+  await writeFile(path.join(f.directory, "src", "target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitPath(f, "src/target.ts");
+
+  const ref = reference(f, "nested-cwd");
+  const sessionCwd = path.join(f.directory, "src");
+  const session = summary(ref, sessionCwd, commit, { sessionId: "nested-cwd" });
+  const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine], "target.ts"));
+  const report = await analyzeLocation("src/target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
+  assert.equal(report.correlation?.selected?.signals.some((signal) => signal.kind === "structured-patch-overlap"), true);
+});
+
+test("existing nested repository common Git directory overrides worktree containment", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const nestedRepoFirstSignal = \"alpha\";";
+  const secondLine = "const nestedRepoSecondSignal = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const ref = reference(f, "nested-repository");
+  const session = summary(ref, nestedRepository, commit, { sessionId: "nested-repository" });
+  const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine]));
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(source.extractionCalls, 0);
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 0);
+});
+
 test("a deleted prunable linked worktree remains a linked repository match", async (t) => {
   const f = await fixture(t);
   const firstLine = "linked worktree one";
@@ -325,7 +383,11 @@ test("a deleted prunable linked worktree remains a linked repository match", asy
   assert.match(worktreeList, /prunable/);
   const ref = reference(f, "prunable-linked");
   const session = summary(ref, historicalCwd, commit, { sessionId: "prunable-linked" });
-  const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine]));
+  const historicalTargetPath = path.relative(historicalCwd, path.join(linked, "src-target.ts"));
+  const source = new FakeAgentHistorySource(
+    session,
+    evidence(session, [firstLine, secondLine], historicalTargetPath),
+  );
   const report = await analyzeLocation("src-target.ts:2", {
     currentDirectory: f.directory,
     git: f.runner,

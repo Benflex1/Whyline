@@ -321,3 +321,58 @@ passed
 git diff --check
 passed
 ```
+
+## Fix round 5/5
+
+### Important findings addressed
+
+1. `correlate-codex` now resolves each supported evidence path from the
+   adapter's historical session cwd into the repository-relative namespace
+   before constructing the pure correlation input. Existing current and
+   linked worktree cwd mappings use their inspected repository roots; a
+   missing cwd below a prunable linked-worktree mapping uses the retained Git
+   worktree mapping lexically. Absolute evidence paths are converted only when
+   they are inside a current/linked worktree, and unresolved relative or
+   outside paths are dropped. Session cwd/source-path fields remain projected
+   away, including unsafe rename sources, and no basename inference is used.
+
+2. Existing historical cwds now have their Git common directory inspected
+   before lexical current/linked-worktree containment is accepted. A known
+   different common Git directory, including a nested repository or submodule,
+   makes the candidate incompatible. Lexical containment is retained only for
+   deleted/prunable mapped linked worktrees whose filesystem identity cannot be
+   inspected; arbitrary deleted cwds remain unknown.
+
+### Regression and TDD evidence
+
+Added regressions for nested historical cwd rebasing and an existing nested
+repository mismatch. The existing prunable linked-worktree regression now also
+uses a path relative to its deleted nested cwd, exercising safe deleted-cwd
+rebasing. The red run failed in the expected three cases before the fix; the
+same focused flow tests passed after implementation.
+
+Tasks 6 and 7 were not started. Prior coverage for truncation, prunable and
+unknown cwd handling, diagnostics, privacy, read-only Git execution,
+availability, candidate selection, and mutation detection remains intact.
+
+### Fix-round verification
+
+```text
+Focused: npm run build && node --test dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-flow.test.js dist/test/provenance-correlation-target.test.js dist/test/git-provenance.test.js
+49 passed, 0 failed
+
+npm test
+81 passed, 0 failed
+
+npm run check
+81 passed, 0 failed; typecheck passed
+
+npm run typecheck
+passed
+
+npm run build
+passed
+
+git diff --check
+passed
+```

@@ -45,6 +45,7 @@ interface SummaryCandidate {
   readonly ref: AgentSessionRef;
   readonly summary: AgentSessionSummary;
   readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly pathMapping: HistoricalPathMapping | null;
   readonly references: readonly ResolvedCommitReference[];
   readonly input: CorrelationCandidateInput;
 }
@@ -175,6 +176,21 @@ function diagnosticLimitations(
 
 const OPAQUE_SESSION_SOURCE = "<opaque-agent-session>";
 
+interface HistoricalPathMapping {
+  readonly repositoryRoot: string;
+  readonly historicalCwd: string;
+}
+
+interface HistoricalDirectoryResolution {
+  readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly pathMapping: HistoricalPathMapping | null;
+}
+
+interface RepositoryAssessment {
+  readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly pathMapping: HistoricalPathMapping | null;
+}
+
 function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummary {
   return {
     ref: {
@@ -197,32 +213,66 @@ function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummar
   };
 }
 
-function projectEvidencePath(value: string, worktreeRoot: string): string | null {
-  if (!path.isAbsolute(value)) return value;
-  const relative = path.relative(worktreeRoot, value);
-  if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+function repositoryRoots(repository: RepositoryContext): readonly string[] {
+  return [
+    repository.worktreeRoot,
+    ...repository.worktrees.map((worktree) => worktree.path),
+  ]
+    .map((root) => path.resolve(root))
+    .filter((root, index, roots) => roots.indexOf(root) === index)
+    .sort((left, right) => right.length - left.length);
+}
+
+function relativeRepositoryPath(root: string, value: string): string | null {
+  const relative = path.relative(path.resolve(root), path.resolve(value));
+  if (relative.length === 0 || relative === ".." || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative)) {
+    return null;
+  }
   return relative.split(path.sep).join("/");
+}
+
+function projectEvidencePath(
+  value: string,
+  repository: RepositoryContext,
+  mapping: HistoricalPathMapping | null,
+): string | null {
+  if (value === "<outside-session-root>" || value.length === 0) return null;
+
+  if (path.isAbsolute(value)) {
+    for (const root of repositoryRoots(repository)) {
+      const relative = relativeRepositoryPath(root, value);
+      if (relative !== null) return relative;
+    }
+    return null;
+  }
+
+  if (mapping === null) return null;
+  const historicalPath = path.resolve(mapping.historicalCwd, value);
+  return relativeRepositoryPath(mapping.repositoryRoot, historicalPath);
 }
 
 function projectEvidence(
   evidence: AgentEvidenceBundle["evidence"][number],
-  worktreeRoot: string,
+  repository: RepositoryContext,
+  mapping: HistoricalPathMapping | null,
 ): AgentEvidenceBundle["evidence"][number] {
   const patch = evidence.patch === undefined
     ? undefined
     : {
       ...evidence.patch,
       changes: evidence.patch.changes.flatMap((change) => {
-        const normalizedPath = projectEvidencePath(change.path, worktreeRoot);
+        const normalizedPath = projectEvidencePath(change.path, repository, mapping);
         if (normalizedPath === null) return [];
         const normalizedMovedFrom = change.movedFrom === undefined
           ? null
-          : projectEvidencePath(change.movedFrom, worktreeRoot);
-        return [{
-          ...change,
-          path: normalizedPath,
-          ...(normalizedMovedFrom === null ? {} : { movedFrom: normalizedMovedFrom }),
-        }];
+          : projectEvidencePath(change.movedFrom, repository, mapping);
+        const normalizedChange = { ...change, path: normalizedPath };
+        if (normalizedMovedFrom === null) {
+          delete normalizedChange.movedFrom;
+          return [normalizedChange];
+        }
+        return [{ ...normalizedChange, movedFrom: normalizedMovedFrom }];
       }),
     };
   return {
@@ -230,7 +280,7 @@ function projectEvidence(
     kind: evidence.kind,
     occurredAt: evidence.occurredAt,
     paths: evidence.paths.flatMap((value) => {
-      const normalized = projectEvidencePath(value, worktreeRoot);
+      const normalized = projectEvidencePath(value, repository, mapping);
       return normalized === null ? [] : [normalized];
     }),
     operation: evidence.operation,
@@ -249,11 +299,12 @@ function projectEvidence(
 
 function projectEvidenceBundle(
   bundle: AgentEvidenceBundle,
-  worktreeRoot: string,
+  repository: RepositoryContext,
+  mapping: HistoricalPathMapping | null,
 ): AgentEvidenceBundle {
   return {
     session: projectSessionSummary(bundle.session),
-    evidence: bundle.evidence.map((evidence) => projectEvidence(evidence, worktreeRoot)),
+    evidence: bundle.evidence.map((evidence) => projectEvidence(evidence, repository, mapping)),
     unknownRecordCount: bundle.unknownRecordCount,
     diagnostics: bundle.diagnostics,
   };
@@ -285,67 +336,144 @@ async function historicalCommonGitDir(
   }
 }
 
-function mappedWorktreeMatch(
+async function historicalWorktreeRoot(
+  runner: GitRunner,
+  directory: string,
+): Promise<string | null> {
+  try {
+    const result = await runner.run(
+      ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+      { cwd: directory },
+    );
+    if (result.exitCode !== 0) return null;
+    const value = result.stdout.toString("utf8").trim();
+    return value.length === 0 ? null : path.resolve(value);
+  } catch {
+    return null;
+  }
+}
+
+function deletedMappedWorktree(
   repository: RepositoryContext,
   directory: string,
-): CorrelationRepositoryMatch | null {
+): { readonly repositoryMatch: CorrelationRepositoryMatch; readonly repositoryRoot: string } | null {
   if (!path.isAbsolute(directory)) return null;
   const normalizedDirectory = path.resolve(directory);
   const normalizedCurrentRoot = path.resolve(repository.worktreeRoot);
-  if (normalizedDirectory === normalizedCurrentRoot) {
-    return "current-worktree";
+  const linked = repository.worktrees.find((worktree) => {
+    const worktreeRoot = path.resolve(worktree.path);
+    return worktreeRoot !== normalizedCurrentRoot
+      && worktree.prunable
+      && isWithinDirectory(worktreeRoot, normalizedDirectory);
+  });
+  return linked === undefined
+    ? null
+    : { repositoryMatch: "linked-worktree", repositoryRoot: path.resolve(linked.path) };
+}
+
+function positiveMatch(
+  left: CorrelationRepositoryMatch,
+  right: CorrelationRepositoryMatch,
+): CorrelationRepositoryMatch {
+  const rank = (value: CorrelationRepositoryMatch): number => {
+    switch (value) {
+      case "current-worktree": return 3;
+      case "linked-worktree": return 2;
+      case "same-common-directory": return 1;
+      default: return 0;
+    }
+  };
+  return rank(right) > rank(left) ? right : left;
+}
+
+async function resolveHistoricalDirectory(
+  runner: GitRunner,
+  repository: RepositoryContext,
+  directory: string,
+): Promise<HistoricalDirectoryResolution> {
+  const canonical = await existingCanonicalPath(directory);
+  if (canonical !== null) {
+    const commonGitDir = await historicalCommonGitDir(runner, directory);
+    if (commonGitDir === null) {
+      return { repositoryMatch: "unknown", pathMapping: null };
+    }
+    if (path.resolve(commonGitDir) !== path.resolve(repository.commonGitDir)) {
+      return { repositoryMatch: "incompatible", pathMapping: null };
+    }
+
+    const currentRoot = path.resolve(repository.worktreeRoot);
+    if (isWithinDirectory(currentRoot, canonical)) {
+      return {
+        repositoryMatch: "current-worktree",
+        pathMapping: { repositoryRoot: currentRoot, historicalCwd: canonical },
+      };
+    }
+
+    const linked = repository.worktrees.find((worktree) =>
+      path.resolve(worktree.path) !== currentRoot
+        && isWithinDirectory(path.resolve(worktree.path), canonical));
+    if (linked !== undefined) {
+      return {
+        repositoryMatch: "linked-worktree",
+        pathMapping: {
+          repositoryRoot: path.resolve(linked.path),
+          historicalCwd: canonical,
+        },
+      };
+    }
+
+    const historicalRoot = await historicalWorktreeRoot(runner, directory);
+    return {
+      repositoryMatch: "same-common-directory",
+      pathMapping: historicalRoot === null
+        ? null
+        : { repositoryRoot: historicalRoot, historicalCwd: canonical },
+    };
   }
-  const linked = repository.worktrees.some((worktree) =>
-    path.resolve(worktree.path) !== normalizedCurrentRoot
-      && isWithinDirectory(path.resolve(worktree.path), normalizedDirectory));
-  return linked ? "linked-worktree" : null;
+
+  const mapped = deletedMappedWorktree(repository, directory);
+  if (mapped !== null) {
+    return {
+      repositoryMatch: mapped.repositoryMatch,
+      pathMapping: {
+        repositoryRoot: mapped.repositoryRoot,
+        historicalCwd: path.resolve(directory),
+      },
+    };
+  }
+
+  return { repositoryMatch: "unknown", pathMapping: null };
 }
 
 async function classifyRepository(
   runner: GitRunner,
   repository: RepositoryContext,
   summary: AgentSessionSummary,
-): Promise<CorrelationRepositoryMatch> {
+): Promise<RepositoryAssessment> {
   const directories = [...new Set([
     summary.initialCwd,
     ...summary.workingDirectories,
   ].filter((value): value is string => value !== undefined))];
   let foundIncompatible = false;
-  const linked = repository.worktrees.filter((worktree) =>
-    worktree.path !== repository.worktreeRoot);
-  let positiveMatch: CorrelationRepositoryMatch = "unknown";
+  let match: CorrelationRepositoryMatch = "unknown";
+  let pathMapping: HistoricalPathMapping | null = null;
 
   for (const directory of directories) {
-    const mappedMatch = mappedWorktreeMatch(repository, directory);
-    if (mappedMatch !== null) {
-      if (mappedMatch === "current-worktree"
-        || positiveMatch === "unknown") {
-        positiveMatch = mappedMatch;
-      }
+    const resolved = await resolveHistoricalDirectory(runner, repository, directory);
+    if (directory === summary.initialCwd && resolved.pathMapping !== null) {
+      pathMapping = resolved.pathMapping;
+    }
+    if (resolved.repositoryMatch === "incompatible") {
+      foundIncompatible = true;
       continue;
     }
-    const canonical = await existingCanonicalPath(directory);
-    if (canonical === null) continue;
-
-    if (isWithinDirectory(repository.worktreeRoot, canonical)) {
-      positiveMatch = "current-worktree";
-      continue;
-    }
-    if (linked.some((worktree) => isWithinDirectory(worktree.path, canonical))) {
-      if (positiveMatch === "unknown") positiveMatch = "linked-worktree";
-      continue;
-    }
-
-    const commonGitDir = await historicalCommonGitDir(runner, directory);
-    if (commonGitDir === null) continue;
-    if (commonGitDir === repository.commonGitDir) {
-      if (positiveMatch === "unknown") positiveMatch = "same-common-directory";
-      continue;
-    }
-    foundIncompatible = true;
+    match = positiveMatch(match, resolved.repositoryMatch);
   }
 
-  return foundIncompatible ? "incompatible" : positiveMatch;
+  return {
+    repositoryMatch: foundIncompatible ? "incompatible" : match,
+    pathMapping,
+  };
 }
 
 function referenceRank(references: readonly ResolvedCommitReference[]): number {
@@ -491,7 +619,7 @@ export async function correlateCodex(
     } catch {
       summary = fallbackSummary(ref, "unreadable-transcript");
     }
-    const repositoryMatch = await classifyRepository(options.git, options.repository, summary);
+    const assessment = await classifyRepository(options.git, options.repository, summary);
     const references = await resolveReferences(
       options.git,
       options.repository,
@@ -501,14 +629,15 @@ export async function correlateCodex(
     const request: CandidateBuildRequest = {
       session: projectSessionSummary(summary),
       evidence: null,
-      repositoryMatch,
+      repositoryMatch: assessment.repositoryMatch,
       references,
       coverageLimitations: diagnosticLimitations(summary.diagnostics),
     };
     return {
       ref,
       summary,
-      repositoryMatch,
+      repositoryMatch: assessment.repositoryMatch,
+      pathMapping: assessment.pathMapping,
       references,
       input: buildCandidateInput(request),
     };
@@ -542,11 +671,21 @@ export async function correlateCodex(
         options.target,
         [...summaryReferences(candidate.summary), ...evidenceReferences(bundle)],
       );
+    const evidenceSession = bundle?.session ?? candidate.summary;
+    const evidencePathMapping = evidenceSession.initialCwd === candidate.summary.initialCwd
+      ? candidate.pathMapping
+      : evidenceSession.initialCwd === undefined
+        ? candidate.pathMapping
+        : (await resolveHistoricalDirectory(
+          options.git,
+          options.repository,
+          evidenceSession.initialCwd,
+        )).pathMapping;
     const fullRequest: CandidateBuildRequest = {
-      session: projectSessionSummary(bundle?.session ?? candidate.summary),
+      session: projectSessionSummary(evidenceSession),
       evidence: bundle === null
         ? null
-        : projectEvidenceBundle(bundle, options.target.repository.worktreeRoot),
+        : projectEvidenceBundle(bundle, options.repository, evidencePathMapping),
       repositoryMatch: candidate.repositoryMatch,
       references: fullReferences,
       coverageLimitations: [

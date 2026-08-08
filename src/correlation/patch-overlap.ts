@@ -179,6 +179,7 @@ export function comparePatchChangeToHunks(
     });
   }
 
+  const hasTruncatedHunk = target.relevantHunks.some(({ truncated }) => truncated);
   const hunkMatches = target.relevantHunks
     .filter((hunkValue) => hunkSharesPath(hunkValue, acceptedPaths))
     .map((hunkValue) => ({
@@ -192,7 +193,8 @@ export function comparePatchChangeToHunks(
       operationCompatible,
       hunkLocal: null,
       distinctiveIntersectionCount: 0,
-      reason: "no-relevant-hunk",
+      reason: hasTruncatedHunk ? "truncated-git-hunk" : "no-relevant-hunk",
+      unknown: hasTruncatedHunk,
     });
   }
 
@@ -223,7 +225,7 @@ export function comparePatchChangeToHunks(
     });
   }
 
-  if (target.relevantHunks.some(({ truncated }) => truncated)) {
+  if (hasTruncatedHunk) {
     return result({
       direct: false,
       pathMatched,

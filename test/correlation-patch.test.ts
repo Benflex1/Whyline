@@ -200,6 +200,26 @@ test("does not treat pathless Git hunks as overlap or divergence", () => {
   assert.equal(hasCompetingStructuredDivergence(pathlessTarget, [competing]), false);
 });
 
+test("surfaces unknown coverage for a truncated pathless Git hunk", () => {
+  const truncatedPathlessTarget = target({
+    relevantHunks: [hunk({ oldPath: null, newPath: null, truncated: true })],
+  });
+  const competing = change({
+    distinctiveLineFingerprints: ["unrelated-one", "unrelated-two"],
+    matchLineFingerprints: ["unrelated-one", "unrelated-two"],
+  });
+
+  const overlap = comparePatchChangeToHunks(truncatedPathlessTarget, competing);
+  assert.equal(overlap.direct, false);
+  assert.equal(overlap.pathMatched, true);
+  assert.equal(overlap.unknown, true);
+  assert.equal(overlap.reason, "truncated-git-hunk");
+  assert.equal(
+    hasCompetingStructuredDivergence(truncatedPathlessTarget, [competing]),
+    false,
+  );
+});
+
 test("rejects unsupported combinations and truncated payloads", () => {
   const unsupported = [
     change({ payloadKind: "content", matchSide: "content", hunkRanges: [] }),

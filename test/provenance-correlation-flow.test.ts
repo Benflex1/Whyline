@@ -316,6 +316,7 @@ test("a deleted prunable linked worktree remains a linked repository match", asy
   const commit = await commitTarget(f);
   const linkedParent = await mkdtemp(path.join(os.tmpdir(), "whyline-prunable-linked-"));
   const linked = path.join(linkedParent, "linked");
+  const historicalCwd = path.join(linked, "nested", "deleted", "cwd");
   t.after(async () => rm(linkedParent, { recursive: true, force: true }));
   await runGit(f, ["worktree", "add", "--detach", linked, commit]);
   await rm(linked, { recursive: true, force: true });
@@ -323,7 +324,7 @@ test("a deleted prunable linked worktree remains a linked repository match", asy
   const worktreeList = (await runGit(f, ["worktree", "list", "--porcelain", "-z"])).toString("utf8");
   assert.match(worktreeList, /prunable/);
   const ref = reference(f, "prunable-linked");
-  const session = summary(ref, linked, commit, { sessionId: "prunable-linked" });
+  const session = summary(ref, historicalCwd, commit, { sessionId: "prunable-linked" });
   const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine]));
   const report = await analyzeLocation("src-target.ts:2", {
     currentDirectory: f.directory,

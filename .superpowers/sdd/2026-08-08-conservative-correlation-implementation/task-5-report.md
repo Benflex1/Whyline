@@ -262,3 +262,62 @@ npm test            77 passed, 0 failed
 npm run check       77 passed, 0 failed
 git diff --check    passed
 ```
+
+## Fix round 4/5
+
+### Reviewer findings addressed
+
+1. `mappedWorktreeMatch` now compares normalized absolute paths using
+   containment for non-current linked worktree mappings. A listed/prunable
+   linked checkout therefore preserves `linked-worktree` identity for a
+   historical cwd below that mapping even when the nested directory was
+   deleted. The current worktree still requires its exact mapped root before
+   `realpath`, and arbitrary deleted paths outside a linked mapping remain
+   `unknown`; no basename or filename inference was added.
+
+2. `buildCorrelationTarget` now records whether bounded added/deleted Git
+   fingerprint extraction omitted lines and folds that fact into the
+   normalized hunk's `truncated` flag. Fingerprints remain SHA-256, bounded,
+   and raw-free; parser-level truncation is preserved.
+
+3. `correlate` now merges the target-level `truncated-git-hunk` limitation into
+   global coverage before the unavailable and selection gates. A truncated
+   relevant target therefore remains material/limited even when no candidate
+   is eligible or scored, while candidate-derived limitations and existing
+   unavailable semantics remain unchanged.
+
+### Regression and TDD evidence
+
+Added focused regressions for the nested deleted linked cwd in
+`test/provenance-correlation-flow.test.ts`, bounded raw-free Git fingerprints
+in `test/provenance-correlation-target.test.ts`, and zero-candidate target
+coverage in `test/correlation-decision-table.test.ts`.
+
+The initial RED run failed for the expected reasons: the nested cwd classified
+as `unknown`, bounded target extraction returned `truncated: false`, and zero
+candidates left global coverage `complete`. The same focused tests passed after
+the minimal fixes. Existing prunable-root, unknown-cwd, candidate-derived
+coverage, patch-overlap, Git provenance, and privacy/read-only semantics remain
+covered by the existing suite. Tasks 6 and 7 were not started.
+
+### Fix-round verification
+
+```text
+Focused: npm run build && node --test dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-flow.test.js dist/test/provenance-correlation-target.test.js
+18 passed, 0 failed
+
+npm test
+79 passed, 0 failed
+
+npm run check
+79 passed, 0 failed; typecheck passed
+
+npm run typecheck
+passed
+
+npm run build
+passed
+
+git diff --check
+passed
+```

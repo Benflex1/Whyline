@@ -478,6 +478,22 @@ test("candidate material limitations are reflected in global coverage", () => {
   }
 });
 
+test("truncated target coverage remains material when no candidates are scored", () => {
+  const result = correlate(
+    target({ relevantHunks: [hunk({ truncated: true })] }),
+    [],
+    coverage({ discoveredRefs: 0, summaryEligibleRefs: 0, fullyExtractedRefs: 0 }),
+  );
+
+  assert.equal(result.status, "none");
+  assert.equal(result.coverage.status, "limited");
+  assert.equal(
+    result.coverage.limitations.some((limitation) =>
+      limitation.kind === "truncated-git-hunk" && limitation.material),
+    true,
+  );
+});
+
 test("operation and coverage table gates direct overlap and final selection", () => {
   const operationCases: readonly {
     readonly name: string;

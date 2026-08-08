@@ -291,12 +291,13 @@ function mappedWorktreeMatch(
 ): CorrelationRepositoryMatch | null {
   if (!path.isAbsolute(directory)) return null;
   const normalizedDirectory = path.resolve(directory);
-  if (normalizedDirectory === path.resolve(repository.worktreeRoot)) {
+  const normalizedCurrentRoot = path.resolve(repository.worktreeRoot);
+  if (normalizedDirectory === normalizedCurrentRoot) {
     return "current-worktree";
   }
   const linked = repository.worktrees.some((worktree) =>
-    path.resolve(worktree.path) !== path.resolve(repository.worktreeRoot)
-      && path.resolve(worktree.path) === normalizedDirectory);
+    path.resolve(worktree.path) !== normalizedCurrentRoot
+      && isWithinDirectory(path.resolve(worktree.path), normalizedDirectory));
   return linked ? "linked-worktree" : null;
 }
 

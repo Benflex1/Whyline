@@ -85,6 +85,16 @@ function coverageWithCandidateLimitations(
   return coverageWithLimitations(coverage, limitations);
 }
 
+function coverageWithTargetLimitations(
+  coverage: CorrelationCoverage,
+  target: CorrelationTarget,
+): CorrelationCoverage {
+  const limitations: CorrelationLimitation[] = target.relevantHunks.some((hunk) => hunk.truncated)
+    ? [{ kind: "truncated-git-hunk", material: true }]
+    : [];
+  return coverageWithLimitations(coverage, limitations);
+}
+
 function sufficientCoverage(
   target: CorrelationTarget,
   candidates: readonly CorrelationCandidate[],
@@ -105,11 +115,12 @@ export function correlate(
   coverage: CorrelationCoverage,
 ): CorrelationResult {
   const inputCoverage = coverageWithInputLimitations(coverage, inputs);
-  if (inputCoverage.status === "unavailable") {
+  const targetCoverage = coverageWithTargetLimitations(inputCoverage, target);
+  if (targetCoverage.status === "unavailable") {
     return {
       status: "unavailable",
       alternatives: [],
-      coverage: inputCoverage,
+      coverage: targetCoverage,
     };
   }
 
@@ -120,7 +131,7 @@ export function correlate(
       candidate: scoreCandidate(target, input),
     }))
     .sort((left, right) => compareCandidates(left.candidate, right.candidate));
-  const effectiveCoverage = coverageWithCandidateLimitations(inputCoverage, scoredCandidates);
+  const effectiveCoverage = coverageWithCandidateLimitations(targetCoverage, scoredCandidates);
   const candidates = scoredCandidates.map((scored) => scored.candidate);
   const strong = candidates.filter((candidate) => candidate.band === "strong");
   const alternatives = visibleCandidates(candidates);

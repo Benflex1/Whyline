@@ -49,15 +49,19 @@ function sideFingerprints(
 ): {
   readonly all: readonly string[];
   readonly distinctive: readonly string[];
+  readonly truncated: boolean;
 } {
-  const selected = lines
-    .filter((line) => line.kind === kind)
-    .slice(0, MAX_HUNK_FINGERPRINTS);
+  const matching = lines.filter((line) => line.kind === kind);
+  const selected = matching.slice(0, MAX_HUNK_FINGERPRINTS);
   const all = selected.map((line) => digestLine(line.text));
   const distinctive = selected
     .filter((line) => isDistinctiveLine(line.text))
     .map((line) => digestLine(line.text));
-  return { all, distinctive: [...new Set(distinctive)] };
+  return {
+    all,
+    distinctive: [...new Set(distinctive)],
+    truncated: selected.length < matching.length,
+  };
 }
 
 function correlationHunk(hunk: GitHunk): CorrelationHunk {
@@ -75,7 +79,7 @@ function correlationHunk(hunk: GitHunk): CorrelationHunk {
     deletedLineFingerprints: deleted.all,
     distinctiveAddedLineFingerprints: added.distinctive,
     distinctiveDeletedLineFingerprints: deleted.distinctive,
-    truncated: hunk.truncated,
+    truncated: hunk.truncated || added.truncated || deleted.truncated,
   };
 }
 

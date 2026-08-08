@@ -22,7 +22,8 @@ export interface CodexDiscoveryResult extends AgentHistoryDiscoveryResult {
 }
 
 export function resolveCodexHome(options: CodexDiscoveryOptions = {}): string {
-  const configuredHome = options.codexHome ?? options.environment?.CODEX_HOME;
+  const configuredHome = options.codexHome
+    ?? (options.environment ?? process.env).CODEX_HOME;
   const home = configuredHome !== undefined && configuredHome.length > 0
     ? configuredHome
     : path.join(options.homeDirectory ?? os.homedir(), ".codex");

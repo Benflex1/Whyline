@@ -86,6 +86,67 @@ async function writeFixtureFile(directory: string, relativePath: string, content
   await writeFile(filePath, content);
 }
 
+async function writeCodexPatchTranscript(
+  codexHome: string,
+  sessionId: string,
+  cwd: string,
+  commit: string,
+): Promise<void> {
+  const sourcePath = path.join(codexHome, "sessions", "2026", "08", "08", `${sessionId}.jsonl`);
+  const callId = `call-${sessionId}`;
+  const firstLine = "const cliHomeFirst = \"target-alpha\";";
+  const secondLine = "const cliHomeSecond = \"target-beta\";";
+  const unifiedDiff = `@@ -0,0 +1,2 @@\n+${firstLine}\n+${secondLine}\n`;
+  const records = [
+    {
+      timestamp: "2026-08-08T01:00:00.000Z",
+      type: "session_meta",
+      payload: {
+        session_id: sessionId,
+        timestamp: "2026-08-08T01:00:00.000Z",
+        cwd,
+        originator: "t3code_desktop",
+        source: "vscode",
+        cli_version: "0.147.0",
+        git: { branch: "main", commit_hash: commit },
+      },
+    },
+    {
+      timestamp: "2026-08-08T01:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        id: `item-${sessionId}`,
+        call_id: callId,
+        name: "apply_patch",
+        input: "*** Begin Patch\n*** Update File: cli.ts\n@@ -0,0 +1,2 @@\n*** End Patch",
+      },
+    },
+    {
+      timestamp: "2026-08-08T01:00:02.000Z",
+      type: "event_msg",
+      payload: {
+        type: "patch_apply_end",
+        call_id: callId,
+        status: "completed",
+        success: true,
+        changes: {
+          [path.join(cwd, "cli.ts")]: {
+            type: "update",
+            unified_diff: unifiedDiff,
+          },
+        },
+      },
+    },
+  ];
+  await mkdir(path.dirname(sourcePath), { recursive: true });
+  await writeFile(
+    sourcePath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
+  );
+}
+
 async function commitFixture(
   fixtureValue: Fixture,
   message: string,
@@ -577,6 +638,38 @@ test("representative CLI output is deterministic and control-character-free", as
   assert.match(result.stdout, /Relevant change/);
   assert.doesNotMatch(result.stdout, /\u001b/);
   assert.doesNotMatch(result.stderr, /\u001b/);
+});
+
+test("the CLI honors CODEX_HOME without consulting the ambient home profile", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const cliHomeFirst = \"target-alpha\";";
+  const secondLine = "const cliHomeSecond = \"target-beta\";";
+  await writeFixtureFile(f.directory, "cli.ts", `${firstLine}\n${secondLine}\n`);
+  const commit = await commitFixture(f, "cli: use synthetic Codex home", "2026-08-08T01:00:00Z");
+
+  const ambientHome = await mkdtemp(path.join(os.tmpdir(), "whyline-cli-ambient-home-"));
+  t.after(async () => rm(ambientHome, { recursive: true, force: true }));
+  await writeCodexPatchTranscript(
+    f.environment.CODEX_HOME as string,
+    "synthetic-home-marker",
+    f.directory,
+    commit,
+  );
+  await writeCodexPatchTranscript(
+    path.join(ambientHome, ".codex"),
+    "ambient-profile-marker",
+    f.directory,
+    commit,
+  );
+
+  const cliPath = path.resolve(process.cwd(), "dist/src/cli/main.js");
+  const result = await execFileAsync(process.execPath, [cliPath, "cli.ts:1"], {
+    cwd: f.directory,
+    env: { ...f.environment, HOME: ambientHome, FORCE_COLOR: "0" },
+    maxBuffer: 256 * 1024,
+  });
+  assert.match(result.stdout, /Likely related Codex session: synthetic-home-marker/);
+  assert.doesNotMatch(result.stdout, /ambient-profile-marker/);
 });
 
 test("the CLI maps malformed input to exit code 2", async (t) => {

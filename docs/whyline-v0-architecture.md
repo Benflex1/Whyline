@@ -169,6 +169,11 @@ or unavailable source. A readable Codex home with readable stores and no
 transcripts is `available`; a readable home with partially unreadable stores is
 `limited`; an unavailable or unreadable effective home is `unavailable`.
 
+The integration exposes only narrow analysis-level seams for an injected
+`AgentHistorySource` and an optional Codex history root used by tests and staged
+callers. The normal CLI resolves `CODEX_HOME` or the process home's `.codex`;
+there is no general configuration surface or persistent history state.
+
 ### Data flow
 
 1. Parse `<file>:<line>` from the right so paths containing colons can be handled where possible.
@@ -487,6 +492,14 @@ and worktree discovery remains authoritative for repository identity and
 `commonGitDir`; transcript cwd, optional branch, and optional commit hash are
 correlation evidence only.
 
+The staged coordinator reclassifies the full evidence bundle before projecting
+it into the pure domain. Evidence from a known incompatible repository is
+discarded. If full-bundle working-directory context is incompatible or
+unresolvable, cwd-less evidence is not inherited from the initial mapping;
+relevant dropped records add a material coverage limitation. Explicit evidence
+with a compatible cwd can still contribute, while missing or unresolvable paths
+never establish repository identity.
+
 ### Signals and initial weights
 
 Use an explainable additive score only to order candidates within confidence gates. Initial weights should be fixture-calibrated, not presented to users as probabilities:
@@ -572,7 +585,7 @@ The preflight deliverable should be a short format matrix, parser invariants, un
 
 ### Repository and worktree context
 
-Run commands with `git -C <resolved-directory>` and a fixed environment that disables optional locks, color, pagers, and locale-dependent presentation where applicable.
+Run commands through the Git runner with `<resolved-directory>` as the subprocess working directory (equivalent to `git -C`) and a fixed environment that disables optional locks, color, pagers, and locale-dependent presentation where applicable.
 
 - `git rev-parse --path-format=absolute --show-toplevel`
 - `git rev-parse --path-format=absolute --git-dir`
@@ -838,11 +851,16 @@ Each slice should be reviewable and independently testable.
 
 ## Recommended next action
 
-The Codex adapter foundation and the Git-only location/evidence slices are now
-implemented against the completed redacted fixture corpus. The next focused
-slice is conservative **Git ↔ Codex correlation**: consume the normalized Git
-report and Codex evidence without changing either subsystem, and preserve
-ambiguity or missing evidence as explicit outcomes.
+The Codex adapter foundation, Git-only location/evidence slices, and conservative
+committed-location **Git ↔ Codex correlation** are implemented against the
+completed redacted fixture corpus. The integrated path keeps uncommitted and
+untracked queries Git-only, bounds full extraction at 32 eligible sessions, and
+refuses a final match when candidate, evidence, or relevant-hunk coverage is
+materially limited. Full evidence is repository-reclassified before projection,
+so incompatible or ambiguous cwd-less records cannot contribute an unsupported
+match. The remaining next step is release hardening: verify the documented Node
+and Git version floors, package the CLI in a clean environment, and retain the
+preflight's conservative behavior for unsupported transcript variants.
 
 ## Documentation basis
 

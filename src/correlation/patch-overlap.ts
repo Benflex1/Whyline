@@ -32,13 +32,29 @@ function changePaths(change: AgentPatchChange): readonly string[] {
 }
 
 function targetPaths(target: CorrelationTarget): ReadonlySet<string> {
-  const paths = new Set<string>([target.targetPath]);
-  if (target.blamedPath !== null) {
-    paths.add(target.blamedPath);
-  }
-  for (const changedPath of target.changedPaths) {
-    if (changedPath.oldPath !== null) paths.add(changedPath.oldPath);
-    if (changedPath.newPath !== null) paths.add(changedPath.newPath);
+  const paths = new Set<string>();
+  const add = (value: string | null): boolean => {
+    if (value === null || paths.has(value)) {
+      return false;
+    }
+    paths.add(value);
+    return true;
+  };
+
+  add(target.targetPath);
+  add(target.blamedPath);
+
+  const connected = (value: string | null): boolean => value !== null && paths.has(value);
+  let aliasesAdded = true;
+  while (aliasesAdded) {
+    aliasesAdded = false;
+    for (const changedPath of target.changedPaths) {
+      if (!connected(changedPath.oldPath) && !connected(changedPath.newPath)) {
+        continue;
+      }
+      aliasesAdded = add(changedPath.oldPath) || aliasesAdded;
+      aliasesAdded = add(changedPath.newPath) || aliasesAdded;
+    }
   }
   return paths;
 }
@@ -59,10 +75,11 @@ function hunkSharesPath(
   hunk: CorrelationHunk,
   paths: ReadonlySet<string>,
 ): boolean {
-  const hunkPaths = [hunk.oldPath, hunk.newPath].filter(
-    (value): value is string => value !== null,
-  );
-  return hunkPaths.length === 0 || hunkPaths.some((value) => paths.has(value));
+  if (hunk.oldPath === null && hunk.newPath === null) {
+    return false;
+  }
+  return (hunk.oldPath !== null && paths.has(hunk.oldPath))
+    || (hunk.newPath !== null && paths.has(hunk.newPath));
 }
 
 function distinctiveFingerprints(

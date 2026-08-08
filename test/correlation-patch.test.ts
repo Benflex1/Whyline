@@ -146,6 +146,60 @@ test("accepts current, blamed, and rename-related paths only", () => {
   assert.equal(unrelated.reason, "path-mismatch");
 });
 
+test("does not accept unrelated changed paths for direct overlap", () => {
+  const unrelatedPath = "src/unrelated.ts";
+  const unrelatedTarget = target({
+    changedPaths: [{ oldPath: unrelatedPath, newPath: "src/unrelated-renamed.ts" }],
+    relevantHunks: [hunk({
+      oldPath: unrelatedPath,
+      newPath: "src/unrelated-renamed.ts",
+    })],
+  });
+
+  const overlap = comparePatchChangeToHunks(
+    unrelatedTarget,
+    change({ path: unrelatedPath }),
+  );
+  assert.equal(overlap.direct, false);
+  assert.equal(overlap.pathMatched, false);
+  assert.equal(overlap.reason, "path-mismatch");
+});
+
+test("does not accept unrelated changed paths for divergence", () => {
+  const unrelatedPath = "src/unrelated.ts";
+  const unrelatedTarget = target({
+    changedPaths: [{ oldPath: unrelatedPath, newPath: "src/unrelated-renamed.ts" }],
+    relevantHunks: [hunk({
+      oldPath: unrelatedPath,
+      newPath: "src/unrelated-renamed.ts",
+    })],
+  });
+  const competing = change({
+    path: unrelatedPath,
+    distinctiveLineFingerprints: ["unrelated-one", "unrelated-two"],
+    matchLineFingerprints: ["unrelated-one", "unrelated-two"],
+  });
+
+  assert.equal(hasCompetingStructuredDivergence(unrelatedTarget, [competing]), false);
+});
+
+test("does not treat pathless Git hunks as overlap or divergence", () => {
+  const pathlessTarget = target({
+    relevantHunks: [hunk({ oldPath: null, newPath: null })],
+  });
+
+  const matching = comparePatchChangeToHunks(pathlessTarget, change());
+  assert.equal(matching.direct, false);
+  assert.equal(matching.pathMatched, true);
+  assert.equal(matching.reason, "no-relevant-hunk");
+
+  const competing = change({
+    distinctiveLineFingerprints: ["unrelated-one", "unrelated-two"],
+    matchLineFingerprints: ["unrelated-one", "unrelated-two"],
+  });
+  assert.equal(hasCompetingStructuredDivergence(pathlessTarget, [competing]), false);
+});
+
 test("rejects unsupported combinations and truncated payloads", () => {
   const unsupported = [
     change({ payloadKind: "content", matchSide: "content", hunkRanges: [] }),

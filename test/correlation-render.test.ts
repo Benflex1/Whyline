@@ -107,6 +107,23 @@ test("renders a matched result with bounded fixed evidence", () => {
   }
 });
 
+test("bounds and allocates the selected and possible session IDs", () => {
+  const longSessionId = "x".repeat(256);
+  const matched = renderCorrelation(result("matched", {
+    selected: candidate(longSessionId),
+  }));
+  const possible = renderCorrelation(result("none", {
+    alternatives: [candidate(longSessionId, { band: "plausible" })],
+  }));
+
+  for (const output of [matched, possible]) {
+    assert.equal(output.includes(longSessionId), false);
+    const idLine = output.split("\n").find((line) => line.includes("session: "));
+    assert.ok(idLine !== undefined);
+    assert.equal(idLine.length <= 80, true);
+  }
+});
+
 test("renders ambiguity without selecting a session and extends colliding IDs", () => {
   const output = renderCorrelation(result("ambiguous", {
     alternatives: [
@@ -124,6 +141,26 @@ test("renders ambiguity without selecting a session and extends colliding IDs", 
     "  Coverage: complete",
   ].join("\n"));
   assert.equal(output.includes("Likely related Codex session"), false);
+});
+
+test("keeps distinct session IDs distinct after safe encoding", () => {
+  const output = renderCorrelation(result("ambiguous", {
+    alternatives: [candidate("a/b"), candidate("a?b")],
+  }));
+
+  assert.equal(output.includes("    a~002fb"), true);
+  assert.equal(output.includes("    a~003fb"), true);
+  assert.equal(output.includes("    a_b"), false);
+});
+
+test("does not claim a match for a plausible selected candidate", () => {
+  const output = renderCorrelation(result("matched", {
+    selected: candidate("plausible-selected", { band: "plausible" }),
+  }));
+
+  assert.equal(output.includes("Likely related Codex session"), false);
+  assert.equal(output.includes("Possible related session: plausible-selected"), true);
+  assert.equal(output.includes("Evidence is insufficient to claim a match."), true);
 });
 
 test("renders a lone plausible candidate as possible only", () => {
@@ -153,6 +190,7 @@ test("renders a lone plausible candidate as possible only", () => {
     "Codex evidence",
     "  Possible related session: possible-session",
     "  Evidence: session repository matches the current worktree; structured patch content overlaps the attributed change; structured patch targets the attributed path; structured patch content diverges from the attributed change",
+    "  Evidence is insufficient to claim a match.",
     "  Coverage: limited; some eligible sessions were omitted from bounded inspection",
   ].join("\n"));
 

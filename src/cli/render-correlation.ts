@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   CorrelationCandidate,
   CorrelationLimitationKind,
@@ -8,6 +10,9 @@ import type {
 const MIN_SESSION_ID_PREFIX = 8;
 const MAX_RENDERED_CANDIDATES = 8;
 const MAX_RENDERED_EXPLANATIONS = 4;
+const MAX_RENDERED_SESSION_ID_LENGTH = 80;
+const SESSION_ID_HASH_LENGTH = 16;
+const MAX_SESSION_ID_HASH_LENGTH = 64;
 
 const STATUS_TEXT: Record<CorrelationResult["status"], string> = {
   matched: "No reliable Codex session match found",
@@ -53,29 +58,109 @@ const LIMITATION_TEXT: Record<CorrelationLimitationKind, string> = {
   "material-rollback-or-abort": "session history includes a rollback or aborted turn",
 };
 
-function safeSessionId(sessionId: string | null): string | null {
-  if (sessionId === null || sessionId.length === 0) return null;
-  const safe = sessionId.replace(/[^A-Za-z0-9._~-]/g, "_");
-  return safe.length === 0 ? null : safe;
+interface SessionIdParts {
+  readonly candidate: CorrelationCandidate;
+  readonly encoded: string;
+  readonly digest: string;
 }
 
-function candidateId(candidate: CorrelationCandidate): string | null {
-  return safeSessionId(candidate.session.sessionId);
-}
-
-function displayedIds(candidates: readonly CorrelationCandidate[]): readonly string[] {
-  const ids = candidates
-    .map(candidateId)
-    .filter((value): value is string => value !== null);
-  if (ids.length === 0) return [];
-
-  const minimum = Math.min(MIN_SESSION_ID_PREFIX, Math.max(...ids.map((id) => id.length)));
-  const maximum = Math.max(...ids.map((id) => id.length));
-  for (let length = minimum; length <= maximum; length += 1) {
-    const labels = ids.map((id) => id.length <= length ? id : `${id.slice(0, length)}…`);
-    if (new Set(labels).size === labels.length) return labels;
+function encodeSessionId(sessionId: string): string {
+  let encoded = "";
+  for (let index = 0; index < sessionId.length; index += 1) {
+    const code = sessionId.charCodeAt(index);
+    const safe = (code >= 0x30 && code <= 0x39)
+      || (code >= 0x41 && code <= 0x5a)
+      || (code >= 0x61 && code <= 0x7a)
+      || code === 0x2d
+      || code === 0x2e
+      || code === 0x5f;
+    encoded += safe
+      ? String.fromCharCode(code)
+      : `~${code.toString(16).padStart(4, "0")}`;
   }
-  return ids;
+  return encoded;
+}
+
+function sessionIdParts(candidate: CorrelationCandidate): SessionIdParts | null {
+  const sessionId = candidate.session.sessionId;
+  if (sessionId === null || sessionId.length === 0) return null;
+  return {
+    candidate,
+    encoded: encodeSessionId(sessionId),
+    digest: createHash("sha256").update(sessionId, "utf8").digest("hex"),
+  };
+}
+
+function uniqueCandidates(candidates: readonly CorrelationCandidate[]): readonly CorrelationCandidate[] {
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const sessionId = candidate.session.sessionId;
+    if (sessionId === null || sessionId.length === 0 || seen.has(sessionId)) return false;
+    seen.add(sessionId);
+    return true;
+  });
+}
+
+function labelSessionId(
+  parts: SessionIdParts,
+  prefixLength: number,
+  hashLength: number,
+  includeHash: boolean,
+): string {
+  if (parts.encoded.length <= prefixLength) return parts.encoded;
+  const boundedPrefixLength = Math.min(
+    prefixLength,
+    MAX_RENDERED_SESSION_ID_LENGTH - 1 - (includeHash ? hashLength : 0),
+  );
+  const prefix = parts.encoded.slice(0, Math.max(1, boundedPrefixLength));
+  return includeHash ? `${prefix}…${parts.digest.slice(0, hashLength)}` : `${prefix}…`;
+}
+
+function labelsAreUnique(labels: readonly string[]): boolean {
+  return new Set(labels).size === labels.length;
+}
+
+function allocateSessionIds(
+  candidates: readonly CorrelationCandidate[],
+): ReadonlyMap<CorrelationCandidate, string> {
+  const parts = uniqueCandidates(candidates)
+    .map(sessionIdParts)
+    .filter((value): value is SessionIdParts => value !== null);
+  if (parts.length === 0) return new Map();
+  if (parts.length === 1 && parts[0] !== undefined
+    && parts[0].encoded.length <= MAX_RENDERED_SESSION_ID_LENGTH) {
+    return new Map([[parts[0].candidate, parts[0].encoded]]);
+  }
+
+  const maximumPrefixLength = Math.min(
+    MAX_RENDERED_SESSION_ID_LENGTH - 1,
+    Math.max(...parts.map((value) => value.encoded.length)),
+  );
+  for (let prefixLength = Math.min(MIN_SESSION_ID_PREFIX, maximumPrefixLength);
+    prefixLength <= maximumPrefixLength;
+    prefixLength += 1) {
+    const labels = parts.map((value) => labelSessionId(value, prefixLength, SESSION_ID_HASH_LENGTH, false));
+    if (labelsAreUnique(labels)) {
+      return new Map(parts.map((value, index) => [value.candidate, labels[index] as string]));
+    }
+  }
+
+  for (let hashLength = SESSION_ID_HASH_LENGTH; hashLength <= MAX_SESSION_ID_HASH_LENGTH; hashLength += 1) {
+    const labels = parts.map((value) => labelSessionId(
+      value,
+      MAX_RENDERED_SESSION_ID_LENGTH - 1 - hashLength,
+      hashLength,
+      true,
+    ));
+    if (labelsAreUnique(labels)) {
+      return new Map(parts.map((value, index) => [value.candidate, labels[index] as string]));
+    }
+  }
+
+  return new Map(parts.map((value) => [
+    value.candidate,
+    labelSessionId(value, 1, MAX_SESSION_ID_HASH_LENGTH, true),
+  ]));
 }
 
 function candidateExplanations(candidate: CorrelationCandidate): readonly string[] {
@@ -106,18 +191,27 @@ function renderCoverage(result: CorrelationResult): string {
 }
 
 function renderCandidateList(candidates: readonly CorrelationCandidate[]): string[] {
-  const visible = candidates.slice(0, MAX_RENDERED_CANDIDATES);
-  const ids = displayedIds(visible);
+  const visible = uniqueCandidates(candidates).slice(0, MAX_RENDERED_CANDIDATES);
+  const ids = allocateSessionIds(visible);
   const lines = ["  Candidates:"];
-  let displayed = 0;
-  for (let index = 0; index < visible.length; index += 1) {
-    const candidate = visible[index];
-    const id = ids[displayed];
-    if (candidate === undefined || id === undefined) continue;
-    lines.push(`    ${id}`);
-    displayed += 1;
+  for (const candidate of visible) {
+    const id = ids.get(candidate);
+    if (id !== undefined) lines.push(`    ${id}`);
   }
   return lines;
+}
+
+function appendPossibleCandidate(
+  lines: string[],
+  candidate: CorrelationCandidate,
+): boolean {
+  const id = allocateSessionIds([candidate]).get(candidate);
+  if (id === undefined) return false;
+  lines.push(`  Possible related session: ${id}`);
+  const evidence = renderCandidateEvidence(candidate);
+  if (evidence !== null) lines.push(evidence);
+  lines.push("  Evidence is insufficient to claim a match.");
+  return true;
 }
 
 function possibleCandidate(result: CorrelationResult): CorrelationCandidate | null {
@@ -132,23 +226,26 @@ export function renderCorrelation(result: CorrelationResult): string {
   const lines = ["Codex evidence"];
 
   if (result.status === "matched" && result.selected !== undefined) {
-    const id = candidateId(result.selected);
-    if (id !== null) {
-      lines.push(`  Likely related Codex session: ${id}`);
-      const evidence = renderCandidateEvidence(result.selected);
-      if (evidence !== null) lines.push(evidence);
+    if (result.selected.band === "strong") {
+      const id = allocateSessionIds([result.selected]).get(result.selected);
+      if (id !== undefined) {
+        lines.push(`  Likely related Codex session: ${id}`);
+        const evidence = renderCandidateEvidence(result.selected);
+        if (evidence !== null) lines.push(evidence);
+      } else {
+        lines.push(`  ${STATUS_TEXT[result.status]}`);
+      }
+    } else if (result.selected.band === "plausible") {
+      if (!appendPossibleCandidate(lines, result.selected)) {
+        lines.push(`  ${STATUS_TEXT[result.status]}`);
+      }
     } else {
       lines.push(`  ${STATUS_TEXT[result.status]}`);
     }
   } else if (result.status === "none") {
     const possible = possibleCandidate(result);
     if (possible !== null) {
-      const id = candidateId(possible);
-      if (id !== null) {
-        lines.push(`  Possible related session: ${id}`);
-        const evidence = renderCandidateEvidence(possible);
-        if (evidence !== null) lines.push(evidence);
-      } else {
+      if (!appendPossibleCandidate(lines, possible)) {
         lines.push(`  ${STATUS_TEXT[result.status]}`);
       }
     } else {

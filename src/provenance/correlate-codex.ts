@@ -285,6 +285,21 @@ async function historicalCommonGitDir(
   }
 }
 
+function mappedWorktreeMatch(
+  repository: RepositoryContext,
+  directory: string,
+): CorrelationRepositoryMatch | null {
+  if (!path.isAbsolute(directory)) return null;
+  const normalizedDirectory = path.resolve(directory);
+  if (normalizedDirectory === path.resolve(repository.worktreeRoot)) {
+    return "current-worktree";
+  }
+  const linked = repository.worktrees.some((worktree) =>
+    path.resolve(worktree.path) !== path.resolve(repository.worktreeRoot)
+      && path.resolve(worktree.path) === normalizedDirectory);
+  return linked ? "linked-worktree" : null;
+}
+
 async function classifyRepository(
   runner: GitRunner,
   repository: RepositoryContext,
@@ -300,6 +315,14 @@ async function classifyRepository(
   let positiveMatch: CorrelationRepositoryMatch = "unknown";
 
   for (const directory of directories) {
+    const mappedMatch = mappedWorktreeMatch(repository, directory);
+    if (mappedMatch !== null) {
+      if (mappedMatch === "current-worktree"
+        || positiveMatch === "unknown") {
+        positiveMatch = mappedMatch;
+      }
+      continue;
+    }
     const canonical = await existingCanonicalPath(directory);
     if (canonical === null) continue;
 

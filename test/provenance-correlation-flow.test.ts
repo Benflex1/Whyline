@@ -308,6 +308,35 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   assert.equal(serializedCorrelation.includes("synthetic-home"), false);
 });
 
+test("a deleted prunable linked worktree remains a linked repository match", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "linked worktree one";
+  const secondLine = "linked worktree two";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const linkedParent = await mkdtemp(path.join(os.tmpdir(), "whyline-prunable-linked-"));
+  const linked = path.join(linkedParent, "linked");
+  t.after(async () => rm(linkedParent, { recursive: true, force: true }));
+  await runGit(f, ["worktree", "add", "--detach", linked, commit]);
+  await rm(linked, { recursive: true, force: true });
+
+  const worktreeList = (await runGit(f, ["worktree", "list", "--porcelain", "-z"])).toString("utf8");
+  assert.match(worktreeList, /prunable/);
+  const ref = reference(f, "prunable-linked");
+  const session = summary(ref, linked, commit, { sessionId: "prunable-linked" });
+  const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine]));
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "linked-worktree");
+  assert.equal(report.repository.worktrees.some((worktree) => worktree.path === linked && worktree.prunable), true);
+});
+
 test("committed correlation preserves availability states", async (t) => {
   const cases: readonly {
     readonly availability: AgentHistoryAvailability;

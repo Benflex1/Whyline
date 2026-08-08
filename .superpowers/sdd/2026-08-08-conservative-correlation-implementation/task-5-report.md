@@ -98,9 +98,9 @@ npm run check
 72 passed, 0 failed; exit code 0
 ```
 
-`git diff --check` was clean during review. The full check used the existing
-local Codex home for committed Git tests; uncommitted and untracked flow cases
-made zero discovery calls as required.
+`git diff --check` was clean during review. The full check used fixture-owned,
+injected synthetic Codex homes for committed Git tests; uncommitted and
+untracked flow cases made zero discovery calls as required.
 
 ## Fix round 1/5
 
@@ -176,5 +176,48 @@ npm run typecheck   passed
 npm run build       passed
 npm test            75 passed, 0 failed
 npm run check       75 passed, 0 failed
+git diff --check    passed
+```
+
+## Fix round 2/5
+
+### Reviewer findings addressed
+
+1. `classifyRepository` now checks an absolute transcript cwd against the
+   normalized current worktree root and exact linked-worktree mapping paths
+   before attempting `realpath`. A deleted/prunable linked checkout therefore
+   retains its `linked-worktree` identity from Git's parsed mapping. Arbitrary
+   missing or unresolvable paths do not match a mapping and still produce no
+   positive repository signal. No basename or other broadened identity rule
+   was introduced.
+
+2. Corrected the accumulated verification wording above: committed Git tests
+   use fixture-owned, injected synthetic Codex homes, and do not use the real
+   local Codex profile.
+
+### Regression and self-review
+
+Added a real Git integration regression that creates a detached linked
+worktree, removes its checkout without removing the administrative mapping,
+verifies Git reports it as prunable, and correlates a session whose cwd is the
+deleted mapping path. The result must remain matched with
+`repositoryMatch: "linked-worktree"`.
+
+The change remains within Task 5. Git provenance facts, source projection,
+reference resolution, scoring, renderer boundaries, and Tasks 6/7 were not
+otherwise changed. The mapping check is lexical normalization only and the
+fallback remains the existing realpath/common-Git-dir path for arbitrary
+existing directories.
+
+### Fix-round 2 verification
+
+```text
+Focused: npm run build && node --test dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-flow.test.js dist/test/git-provenance.test.js
+44 passed, 0 failed
+
+npm run typecheck   passed
+npm run build       passed
+npm test            76 passed, 0 failed
+npm run check       76 passed, 0 failed
 git diff --check    passed
 ```

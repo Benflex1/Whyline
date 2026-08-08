@@ -1,0 +1,141 @@
+import type {
+  AgentCommitReferenceKind,
+  AgentEvidenceBundle,
+  AgentPatchChange,
+  AgentSessionSummary,
+} from "../agents/agent-history-source.js";
+
+export type CorrelationSignalKind =
+  | "session-head-target-reference"
+  | "produced-target-commit-reference"
+  | "historical-commit-reference"
+  | "structured-patch-overlap"
+  | "exact-current-worktree"
+  | "linked-worktree-common-directory"
+  | "structured-patch-target-path"
+  | "changed-path-overlap"
+  | "structured-patch-attempt-target-path"
+  | "temporal-proximity"
+  | "structured-content-divergence";
+
+export type CorrelationRepositoryMatch =
+  | "current-worktree"
+  | "linked-worktree"
+  | "same-common-directory"
+  | "historical-commit-anchored"
+  | "unknown"
+  | "incompatible";
+
+export interface CorrelationHunk {
+  readonly oldPath: string | null;
+  readonly newPath: string | null;
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly targetLineKind: "added" | "context" | null;
+  readonly addedLineFingerprints: readonly string[];
+  readonly deletedLineFingerprints: readonly string[];
+  readonly distinctiveAddedLineFingerprints: readonly string[];
+  readonly distinctiveDeletedLineFingerprints: readonly string[];
+  readonly truncated: boolean;
+}
+
+export interface CorrelationTarget {
+  readonly repository: {
+    readonly worktreeRoot: string;
+    readonly commonGitDir: string;
+    readonly objectFormat: string;
+    readonly worktrees: readonly {
+      readonly path: string;
+      readonly commonGitDir: string;
+    }[];
+  };
+  readonly targetPath: string;
+  readonly blamedPath: string | null;
+  readonly commit: {
+    readonly id: string;
+    readonly authoredAt: string;
+    readonly committedAt: string;
+  };
+  readonly selectedParentId: string | null;
+  readonly changedPaths: readonly {
+    readonly oldPath: string | null;
+    readonly newPath: string | null;
+  }[];
+  readonly relevantHunks: readonly CorrelationHunk[];
+}
+
+export interface CorrelationSignal {
+  readonly kind: CorrelationSignalKind;
+  readonly weight: number;
+  readonly basis: "fact" | "derived" | "inferred";
+  readonly evidenceIds: readonly string[];
+}
+
+export type CorrelationLimitationKind =
+  | "empty-readable-store"
+  | "discovery-unavailable"
+  | "discovery-limited"
+  | "unsupported-summary"
+  | "unresolved-repository-candidate"
+  | "candidate-cap"
+  | "summary-coverage"
+  | "partial-transcript"
+  | "corrupt-transcript"
+  | "changed-during-read"
+  | "truncated-git-hunk"
+  | "truncated-patch-payload"
+  | "material-compaction"
+  | "material-rollback-or-abort";
+
+export interface CorrelationLimitation {
+  readonly kind: CorrelationLimitationKind;
+  readonly material: boolean;
+  readonly count?: number;
+}
+
+export interface CorrelationCoverage {
+  readonly status: "complete" | "limited" | "unavailable";
+  readonly discoveredRefs: number;
+  readonly summaryEligibleRefs: number;
+  readonly fullyExtractedRefs: number;
+  readonly omittedEligibleRefs: number;
+  readonly limitations: readonly CorrelationLimitation[];
+}
+
+export interface ResolvedCommitReference {
+  readonly kind: AgentCommitReferenceKind;
+  readonly reference: string;
+  readonly resolution: "target" | "other" | "ambiguous" | "unresolved";
+}
+
+export interface CorrelationCandidateInput {
+  readonly session: AgentSessionSummary;
+  readonly evidence: AgentEvidenceBundle | null;
+  readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly eligible: boolean;
+  readonly references: readonly ResolvedCommitReference[];
+  readonly coverageLimitations: readonly CorrelationLimitation[];
+}
+
+export interface CorrelationCandidate {
+  readonly session: AgentSessionSummary;
+  readonly eligible: boolean;
+  readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly score: number;
+  readonly signals: readonly CorrelationSignal[];
+  readonly contradictions: readonly CorrelationSignal[];
+  readonly band: "strong" | "plausible" | "weak";
+  readonly coverage: "complete" | "limited";
+  readonly coverageLimitations: readonly CorrelationLimitation[];
+}
+
+export interface CorrelationResult {
+  readonly status: "matched" | "ambiguous" | "none" | "unavailable";
+  readonly selected?: CorrelationCandidate;
+  readonly alternatives: readonly CorrelationCandidate[];
+  readonly coverage: CorrelationCoverage;
+}
+
+export type { AgentPatchChange };

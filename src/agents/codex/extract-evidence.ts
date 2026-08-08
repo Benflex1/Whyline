@@ -166,16 +166,19 @@ function recoverPatchChange(
   const payloadRecovered = rawDiff !== undefined || rawContent !== undefined;
   const bounded = boundPayload(rawPayload);
   const lineData = normalizedPayloadLines(bounded.text, payloadKind, changeType);
+  const supportsDirectMatch = (changeType === "update" && payloadKind === "unified-diff")
+    || (changeType === "add" && payloadKind === "content")
+    || (changeType === "delete" && payloadKind === "content");
   const matchSide = changeType === "update" && payloadKind === "unified-diff"
     ? "added"
-    : changeType === "delete"
+    : changeType === "delete" && payloadKind === "content"
       ? "deleted"
       : "content";
-  const matchLineFingerprints = lineData.matchLines
+  const matchLineFingerprints = (supportsDirectMatch ? lineData.matchLines : [])
     .slice(0, MAX_PATCH_LINE_FINGERPRINTS)
     .map((line) => digest(line));
   const distinctiveLineFingerprints = uniqueStrings(
-    lineData.matchLines
+    (supportsDirectMatch ? lineData.matchLines : [])
       .slice(0, MAX_PATCH_LINE_FINGERPRINTS)
       .filter(isDistinctiveLine)
       .map((line) => digest(line)),
@@ -195,7 +198,7 @@ function recoverPatchChange(
     matchLineFingerprints,
     distinctiveLineFingerprints,
     matchSide,
-    hunkRanges: lineData.hunkRanges,
+    hunkRanges: supportsDirectMatch ? lineData.hunkRanges : [],
     lineCount: lineData.lineCount,
   };
   return movedFromValue === undefined ? result : { ...result, movedFrom: movedFromValue };

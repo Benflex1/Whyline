@@ -15,6 +15,7 @@ import {
   parseTranscript,
   readCodexSummary,
 } from "../src/agents/codex/index.js";
+import { isDistinctiveLine } from "../src/agents/codex/safe.js";
 
 const fixtureRoot = path.resolve(process.cwd(), "test/fixtures/codex");
 
@@ -360,6 +361,22 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
           type: "add",
           content: oversizedContent,
         },
+        "/home/alice/projects/example/src/unsupported-add-diff.ts": {
+          type: "add",
+          unified_diff: "@@ -1 +1 @@\n+const unsupportedAddDiff = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-update-content.ts": {
+          type: "update",
+          content: "const unsupportedUpdateContent = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-delete-diff.ts": {
+          type: "delete",
+          unified_diff: "@@ -1 +0,0 @@\n-const unsupportedDeleteDiff = true;\n",
+        },
+        "/home/alice/projects/example/src/unsupported-unknown-content.ts": {
+          type: "rename",
+          content: "const unsupportedUnknownContent = true;\n",
+        },
       },
     }),
   ]);
@@ -368,37 +385,86 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
   const result = evidenceOf(bundle, "patch-result")[0];
   assert.ok(result?.patch);
   const changes = result.patch.changes;
-  assert.equal(changes.length, 4);
+  assert.equal(changes.length, 8);
 
   const update = changes[0];
   assert.equal(update?.matchSide, "added");
   assert.deepEqual(update?.hunkRanges, [{ oldStart: 10, oldLines: 2, newStart: 20, newLines: 4 }]);
-  assert.equal(update?.matchLineFingerprints.length, 4);
-  assert.equal(update?.addedLineFingerprints.length, 4);
-  assert.ok((update?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  assert.deepEqual(update?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "f0201a8fbeb9c7e8240df84401f22f9509fa9aa16d6dc21f7505c7c678530623",
+    "939d37b3e01edd579b15fed2f3e5719849479e01e5a4d2e43b2bb0ce7ed0dc74",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+  ]);
+  assert.deepEqual(update?.addedLineFingerprints, update?.matchLineFingerprints);
+  assert.deepEqual(update?.distinctiveLineFingerprints, [
+    "f0201a8fbeb9c7e8240df84401f22f9509fa9aa16d6dc21f7505c7c678530623",
+    "939d37b3e01edd579b15fed2f3e5719849479e01e5a4d2e43b2bb0ce7ed0dc74",
+  ]);
 
   const added = changes[1];
   assert.equal(added?.matchSide, "content");
   assert.deepEqual(added?.hunkRanges, []);
-  assert.equal(added?.matchLineFingerprints.length, 5);
-  assert.equal(added?.addedLineFingerprints.length, 5);
-  assert.ok((added?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  assert.deepEqual(added?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "9425421c0be371e4aed35b8f35b003fccf84bd0f86f4d2a50d59d76930fa4aeb",
+    "fc6f59038ce3982b857464179a9bf44dfe80ecd01618b4d22ee39b8e1b50b8d8",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  ]);
+  assert.deepEqual(added?.addedLineFingerprints, added?.matchLineFingerprints);
+  assert.deepEqual(added?.distinctiveLineFingerprints, [
+    "9425421c0be371e4aed35b8f35b003fccf84bd0f86f4d2a50d59d76930fa4aeb",
+    "fc6f59038ce3982b857464179a9bf44dfe80ecd01618b4d22ee39b8e1b50b8d8",
+  ]);
 
   const deleted = changes[2];
   assert.equal(deleted?.matchSide, "deleted");
   assert.deepEqual(deleted?.hunkRanges, []);
-  assert.equal(deleted?.matchLineFingerprints.length, 5);
+  assert.deepEqual(deleted?.matchLineFingerprints, [
+    "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
+    "59e7327cfdb0fbd745389358f8e19666299c92110eeefbd209be3716806a771b",
+    "5aeb4fcb228c4f0d08de9c5cc86026585b2cc175dd8a0ef45448182d5165ebda",
+    "d10b36aa74a59bcf4a88185837f658afaf3646eff2bb16c3928d0e9335e945d2",
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  ]);
   assert.deepEqual(deleted?.addedLineFingerprints, []);
-  assert.ok((deleted?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  assert.deepEqual(deleted?.distinctiveLineFingerprints, [
+    "59e7327cfdb0fbd745389358f8e19666299c92110eeefbd209be3716806a771b",
+    "5aeb4fcb228c4f0d08de9c5cc86026585b2cc175dd8a0ef45448182d5165ebda",
+  ]);
 
   const truncated = changes[3];
   assert.equal(truncated?.payloadTruncated, true);
   assert.ok((truncated?.matchLineFingerprints.length ?? 0) <= 128);
   assert.ok((truncated?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  const unsupported = changes.slice(4);
+  assert.equal(unsupported.length, 4);
+  assert.ok(unsupported.every((change) => change.payloadRecovered));
+  assert.ok(unsupported.every((change) => change.matchLineFingerprints.length === 0));
+  assert.ok(unsupported.every((change) => change.distinctiveLineFingerprints.length === 0));
+  assert.ok(unsupported.every((change) => change.hunkRanges.length === 0));
+  assert.ok(unsupported.every((change) => change.addedLineFingerprints.length === 0));
   assert.doesNotMatch(
     JSON.stringify(bundle),
-    /SECRET_RAW_PATCH_INPUT|SECRET_TRUNCATED_SOURCE|private secret context|removed secret source|addedFirst|deletedFirst/,
+    /SECRET_RAW_PATCH_INPUT|SECRET_TRUNCATED_SOURCE|private secret context|removed secret source|firstMeaningful|secondMeaningful|addedFirst|addedSecond|deletedFirst|deletedSecond|truncatedFirst|truncatedSecond|retainedLine|unsupportedAddDiff|unsupportedUpdateContent|unsupportedDeleteDiff|unsupportedUnknownContent/,
   );
+});
+
+test("distinctive line classification rejects weak and boilerplate lines", () => {
+  const weakLines = [
+    "",
+    "abc",
+    "identifierOnly",
+    "{}",
+    "---",
+    "return value;",
+    "throw error;",
+    "yield result;",
+    "return;",
+  ];
+  assert.ok(weakLines.every((line) => !isDistinctiveLine(line)));
+  assert.equal(isDistinctiveLine("const meaningfulValue = true;"), true);
 });
 
 test("unknown, compaction, rollback, abort, and unlinked results become diagnostics", async (t) => {

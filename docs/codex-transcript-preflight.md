@@ -266,12 +266,10 @@ reads/writes and shell/test exit status, and it must make patch overlap
 variant-specific. No archived or standalone `codex exec` sample exists locally,
 so those paths must deliberately degrade rather than be guessed.
 
-## Recommended implementation handoff for Luna
+## Implementation handoff status
 
-Implement only `agents/codex/discover.ts`, `parse-transcript.ts`, and
-`extract-evidence.ts` against the synthetic fixtures. Stream active/archived
-JSONL, require `session_meta.session_id`, support the envelope table above, link
-exact `call_id`s, emit patch-attempt and patch-reported-success separately, and
-produce bounded diagnostics for unknown/compacted/rollback/aborted/partial input.
-Do not parse shell syntax, expose transcript text, use `history.jsonl` as
-evidence, or implement correlation/Git logic yet.
+The adapter described by this preflight is now implemented and verified against
+the synthetic fixtures. Its discovery, streaming parser, privacy diagnostics,
+and normalized evidence remain intentionally separate from Git analysis. The
+next handoff is the conservative correlation slice, which must consume these
+normalized outputs without parsing transcripts in the Git subsystem.

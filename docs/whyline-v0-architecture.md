@@ -503,6 +503,7 @@ Avoid `git log --follow` in v0. It handles only a single path, remains heuristic
 - **Merge commits:** never compare only to the first parent by habit. Use blame parent evidence or return an explicit multi-parent limitation.
 - **Rebase, amend, squash:** treat current object IDs as facts about current history, not durable external identities. Correlation must not require matching session timestamps or stale SHAs.
 - **Shallow or partial clone:** missing parents/objects yield a partial Git report with a clear limitation; do not fetch automatically.
+- **Shallow boundary:** when Git hides a commit's parent and exposes it as parentless, do not treat that commit as a root commit; leave the parent comparison unavailable.
 - **Replace refs or grafts:** record that analysis reflects the repository's currently visible history. A future diagnostic flag may expose replace refs.
 - **Submodules:** a gitlink is not a text file in the superproject. A path inside a checked-out submodule resolves to the submodule repository; the gitlink entry itself is unsupported as a line target.
 - **Symlinks:** reject a symlink target that resolves outside the selected worktree; do not let canonicalization silently switch repositories.
@@ -699,12 +700,11 @@ Each slice should be reviewable and independently testable.
 
 ## Recommended next action
 
-Implement the bounded **Slice 3 Codex adapter** against the completed redacted
-fixture corpus. Keep discovery metadata-only, require
-`session_meta.payload.session_id`, stream JSONL, preserve subagent sessions as
-separate summaries, and expose unsupported or incomplete coverage as
-diagnostics. Do not begin Git correlation or the final CLI until the adapter
-contract and privacy tests are stable.
+The Codex adapter foundation and the Git-only location/evidence slices are now
+implemented against the completed redacted fixture corpus. The next focused
+slice is conservative **Git ↔ Codex correlation**: consume the normalized Git
+report and Codex evidence without changing either subsystem, and preserve
+ambiguity or missing evidence as explicit outcomes.
 
 ## Documentation basis
 

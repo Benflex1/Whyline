@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "whyline": "dist/src/cli/main.js"
+  },
   "engines": {
     "node": ">=24"
   },

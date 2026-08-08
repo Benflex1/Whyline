@@ -1,4 +1,4 @@
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -189,6 +189,12 @@ interface HistoricalDirectoryResolution {
 interface RepositoryAssessment {
   readonly repositoryMatch: CorrelationRepositoryMatch;
   readonly pathMapping: HistoricalPathMapping | null;
+  readonly initialResolution: HistoricalDirectoryResolution;
+}
+
+interface ProjectedEvidencePath {
+  readonly value: string | null;
+  readonly incompatible: boolean;
 }
 
 function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummary {
@@ -213,16 +219,6 @@ function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummar
   };
 }
 
-function repositoryRoots(repository: RepositoryContext): readonly string[] {
-  return [
-    repository.worktreeRoot,
-    ...repository.worktrees.map((worktree) => worktree.path),
-  ]
-    .map((root) => path.resolve(root))
-    .filter((root, index, roots) => roots.indexOf(root) === index)
-    .sort((left, right) => right.length - left.length);
-}
-
 function relativeRepositoryPath(root: string, value: string): string | null {
   const relative = path.relative(path.resolve(root), path.resolve(value));
   if (relative.length === 0 || relative === ".." || relative.startsWith(`..${path.sep}`)
@@ -232,57 +228,159 @@ function relativeRepositoryPath(root: string, value: string): string | null {
   return relative.split(path.sep).join("/");
 }
 
-function projectEvidencePath(
+function evidenceDirectory(
   value: string,
-  repository: RepositoryContext,
-  mapping: HistoricalPathMapping | null,
+  sessionInitialCwd: string | undefined,
 ): string | null {
-  if (value === "<outside-session-root>" || value.length === 0) return null;
-
-  if (path.isAbsolute(value)) {
-    for (const root of repositoryRoots(repository)) {
-      const relative = relativeRepositoryPath(root, value);
-      if (relative !== null) return relative;
-    }
-    return null;
-  }
-
-  if (mapping === null) return null;
-  const historicalPath = path.resolve(mapping.historicalCwd, value);
-  return relativeRepositoryPath(mapping.repositoryRoot, historicalPath);
+  if (value === "<outside-session-root>") return null;
+  if (path.isAbsolute(value)) return path.resolve(value);
+  if (sessionInitialCwd === undefined || !path.isAbsolute(sessionInitialCwd)) return null;
+  return path.resolve(sessionInitialCwd, value);
 }
 
-function projectEvidence(
-  evidence: AgentEvidenceBundle["evidence"][number],
+async function existingDirectoryForPath(value: string): Promise<string | null> {
+  if (!path.isAbsolute(value)) return null;
+  let candidate = path.resolve(value);
+  try {
+    const metadata = await stat(candidate);
+    if (!metadata.isDirectory()) candidate = path.dirname(candidate);
+  } catch {
+    candidate = path.dirname(candidate);
+  }
+
+  while (true) {
+    const canonical = await existingCanonicalPath(candidate);
+    if (canonical !== null) return canonical;
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return null;
+    candidate = parent;
+  }
+}
+
+async function resolveHistoricalPath(
+  runner: GitRunner,
   repository: RepositoryContext,
+  value: string,
+): Promise<HistoricalDirectoryResolution | null> {
+  const directory = await existingDirectoryForPath(value);
+  return directory === null
+    ? null
+    : resolveHistoricalDirectory(runner, repository, directory);
+}
+
+async function projectEvidencePath(
+  value: string,
+  repository: RepositoryContext,
+  runner: GitRunner,
   mapping: HistoricalPathMapping | null,
-): AgentEvidenceBundle["evidence"][number] {
-  const patch = evidence.patch === undefined
-    ? undefined
-    : {
-      ...evidence.patch,
-      changes: evidence.patch.changes.flatMap((change) => {
-        const normalizedPath = projectEvidencePath(change.path, repository, mapping);
-        if (normalizedPath === null) return [];
-        const normalizedMovedFrom = change.movedFrom === undefined
-          ? null
-          : projectEvidencePath(change.movedFrom, repository, mapping);
-        const normalizedChange = { ...change, path: normalizedPath };
-        if (normalizedMovedFrom === null) {
-          delete normalizedChange.movedFrom;
-          return [normalizedChange];
-        }
-        return [{ ...normalizedChange, movedFrom: normalizedMovedFrom }];
-      }),
+): Promise<ProjectedEvidencePath> {
+  if (value === "<outside-session-root>" || value.length === 0) {
+    return { value: null, incompatible: false };
+  }
+
+  if (path.isAbsolute(value)) {
+    const pathResolution = await resolveHistoricalPath(runner, repository, value);
+    if (pathResolution?.repositoryMatch === "incompatible") {
+      return { value: null, incompatible: true };
+    }
+    if (pathResolution?.pathMapping !== null && pathResolution?.pathMapping !== undefined) {
+      return {
+        value: relativeRepositoryPath(pathResolution.pathMapping.repositoryRoot, value),
+        incompatible: false,
+      };
+    }
+    return {
+      value: mapping === null ? null : relativeRepositoryPath(mapping.repositoryRoot, value),
+      incompatible: false,
     };
+  }
+
+  if (mapping === null) return { value: null, incompatible: false };
+  const historicalPath = path.resolve(mapping.historicalCwd, value);
+  const pathResolution = await resolveHistoricalPath(runner, repository, historicalPath);
+  if (pathResolution?.repositoryMatch === "incompatible") {
+    return { value: null, incompatible: true };
+  }
+  return {
+    value: pathResolution?.pathMapping === null || pathResolution?.pathMapping === undefined
+      ? relativeRepositoryPath(mapping.repositoryRoot, historicalPath)
+      : relativeRepositoryPath(pathResolution.pathMapping.repositoryRoot, historicalPath),
+    incompatible: false,
+  };
+}
+
+async function projectEvidence(
+  evidence: AgentEvidenceBundle["evidence"][number],
+  session: AgentSessionSummary,
+  repository: RepositoryContext,
+  runner: GitRunner,
+  fallbackResolution: HistoricalDirectoryResolution,
+): Promise<AgentEvidenceBundle["evidence"][number] | null> {
+  const evidenceDirectoryValue = evidence.cwd === undefined
+    ? null
+    : evidenceDirectory(evidence.cwd, session.initialCwd);
+  const evidenceResolution = evidence.cwd === undefined
+    ? fallbackResolution
+    : evidenceDirectoryValue === null
+      ? { repositoryMatch: "unknown" as const, pathMapping: null }
+      : await resolveHistoricalDirectory(runner, repository, evidenceDirectoryValue);
+  if (evidenceResolution.repositoryMatch === "incompatible") return null;
+
+  let incompatible = false;
+  const projectPath = async (value: string): Promise<string | null> => {
+    const projected = await projectEvidencePath(
+      value,
+      repository,
+      runner,
+      evidenceResolution.pathMapping,
+    );
+    incompatible ||= projected.incompatible;
+    return projected.value;
+  };
+
+  const paths = (await Promise.all(evidence.paths.map(projectPath)))
+    .filter((value): value is string => value !== null);
+  let patch = evidence.patch;
+  if (patch !== undefined) {
+    const projectedChanges: Array<(typeof patch.changes)[number]> = [];
+    for (const change of patch.changes) {
+      const normalizedPath = await projectEvidencePath(
+        change.path,
+        repository,
+        runner,
+        evidenceResolution.pathMapping,
+      );
+      incompatible ||= normalizedPath.incompatible;
+      if (normalizedPath.value === null) continue;
+      const normalizedMovedFrom = change.movedFrom === undefined
+        ? null
+        : await projectEvidencePath(
+          change.movedFrom,
+          repository,
+          runner,
+          evidenceResolution.pathMapping,
+        );
+      incompatible ||= normalizedMovedFrom?.incompatible ?? false;
+      if (normalizedMovedFrom?.incompatible === true) continue;
+      const normalizedChange = { ...change, path: normalizedPath.value };
+      if (normalizedMovedFrom === null
+        || normalizedMovedFrom === undefined
+        || normalizedMovedFrom.value === null) {
+        delete normalizedChange.movedFrom;
+        projectedChanges.push(normalizedChange);
+      } else {
+        projectedChanges.push({ ...normalizedChange, movedFrom: normalizedMovedFrom.value });
+      }
+    }
+    patch = { ...patch, changes: projectedChanges };
+  }
+
+  if (incompatible) return null;
   return {
     id: evidence.id,
     kind: evidence.kind,
     occurredAt: evidence.occurredAt,
-    paths: evidence.paths.flatMap((value) => {
-      const normalized = projectEvidencePath(value, repository, mapping);
-      return normalized === null ? [] : [normalized];
-    }),
+    paths,
     operation: evidence.operation,
     callId: evidence.callId,
     resultRecorded: evidence.resultRecorded,
@@ -297,14 +395,22 @@ function projectEvidence(
   };
 }
 
-function projectEvidenceBundle(
+async function projectEvidenceBundle(
   bundle: AgentEvidenceBundle,
   repository: RepositoryContext,
-  mapping: HistoricalPathMapping | null,
-): AgentEvidenceBundle {
+  runner: GitRunner,
+  fallbackResolution: HistoricalDirectoryResolution,
+): Promise<AgentEvidenceBundle> {
+  const evidence = (await Promise.all(bundle.evidence.map((value) => projectEvidence(
+    value,
+    bundle.session,
+    repository,
+    runner,
+    fallbackResolution,
+  )))).filter((value): value is NonNullable<typeof value> => value !== null);
   return {
     session: projectSessionSummary(bundle.session),
-    evidence: bundle.evidence.map((evidence) => projectEvidence(evidence, repository, mapping)),
+    evidence,
     unknownRecordCount: bundle.unknownRecordCount,
     diagnostics: bundle.diagnostics,
   };
@@ -457,9 +563,16 @@ async function classifyRepository(
   let foundIncompatible = false;
   let match: CorrelationRepositoryMatch = "unknown";
   let pathMapping: HistoricalPathMapping | null = null;
+  let initialResolution: HistoricalDirectoryResolution = {
+    repositoryMatch: "unknown",
+    pathMapping: null,
+  };
 
   for (const directory of directories) {
     const resolved = await resolveHistoricalDirectory(runner, repository, directory);
+    if (directory === summary.initialCwd) {
+      initialResolution = resolved;
+    }
     if (directory === summary.initialCwd && resolved.pathMapping !== null) {
       pathMapping = resolved.pathMapping;
     }
@@ -473,7 +586,23 @@ async function classifyRepository(
   return {
     repositoryMatch: foundIncompatible ? "incompatible" : match,
     pathMapping,
+    initialResolution,
   };
+}
+
+function fullRepositoryMatch(
+  summaryMatch: CorrelationRepositoryMatch,
+  assessment: RepositoryAssessment,
+): CorrelationRepositoryMatch {
+  if (assessment.initialResolution.repositoryMatch === "incompatible") {
+    return "incompatible";
+  }
+  if (assessment.repositoryMatch !== "incompatible" && assessment.repositoryMatch !== "unknown") {
+    return assessment.repositoryMatch;
+  }
+  return assessment.initialResolution.repositoryMatch === "unknown"
+    ? summaryMatch
+    : assessment.initialResolution.repositoryMatch;
 }
 
 function referenceRank(references: readonly ResolvedCommitReference[]): number {
@@ -663,30 +792,39 @@ export async function correlateCodex(
       extractionLimitations = [limitation("corrupt-transcript", true)];
     }
 
+    const evidenceSession = bundle?.session ?? candidate.summary;
+    const evidenceAssessment = bundle === null
+      ? null
+      : await classifyRepository(options.git, options.repository, evidenceSession);
+    const evidenceResolution = evidenceAssessment?.initialResolution ?? {
+      repositoryMatch: "unknown" as const,
+      pathMapping: null,
+    };
+    const fullRepositoryMatchValue = bundle === null
+      ? candidate.repositoryMatch
+      : evidenceAssessment === null
+        ? candidate.repositoryMatch
+        : fullRepositoryMatch(candidate.repositoryMatch, evidenceAssessment);
+    const projectedBundle = bundle === null
+      ? null
+      : await projectEvidenceBundle(
+        bundle,
+        options.repository,
+        options.git,
+        evidenceResolution,
+      );
     const fullReferences = bundle === null
       ? candidate.references
       : await resolveReferences(
         options.git,
         options.repository,
         options.target,
-        [...summaryReferences(candidate.summary), ...evidenceReferences(bundle)],
+        [...summaryReferences(candidate.summary), ...evidenceReferences(projectedBundle ?? bundle)],
       );
-    const evidenceSession = bundle?.session ?? candidate.summary;
-    const evidencePathMapping = evidenceSession.initialCwd === candidate.summary.initialCwd
-      ? candidate.pathMapping
-      : evidenceSession.initialCwd === undefined
-        ? candidate.pathMapping
-        : (await resolveHistoricalDirectory(
-          options.git,
-          options.repository,
-          evidenceSession.initialCwd,
-        )).pathMapping;
     const fullRequest: CandidateBuildRequest = {
       session: projectSessionSummary(evidenceSession),
-      evidence: bundle === null
-        ? null
-        : projectEvidenceBundle(bundle, options.repository, evidencePathMapping),
-      repositoryMatch: candidate.repositoryMatch,
+      evidence: projectedBundle,
+      repositoryMatch: fullRepositoryMatchValue,
       references: fullReferences,
       coverageLimitations: [
         ...candidate.input.coverageLimitations,

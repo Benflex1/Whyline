@@ -542,3 +542,184 @@ test("candidate cap and unresolved repository candidates remain visible in cover
   assert.equal(unresolvedReport.correlation?.status, "none");
   assert.equal(unresolvedReport.correlation?.coverage.limitations.some((value) => value.kind === "unresolved-repository-candidate" && value.material), true);
 });
+
+test("full evidence cwd switching to a nested repository contributes no signals", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const nestedEvidenceFirst = \"alpha\";";
+  const secondLine = "const nestedEvidenceSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const ref = reference(f, "full-nested-cwd");
+  const session = summary(ref, f.directory, commit, { sessionId: "full-nested-cwd" });
+  const bundle = evidence(session, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(session, {
+    ...bundle,
+    session: {
+      ...session,
+      workingDirectories: [f.directory, nestedRepository],
+    },
+    evidence: [{
+      ...bundle.evidence[0]!,
+      cwd: nestedRepository,
+    }],
+  });
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(
+    (report.correlation?.alternatives ?? []).some((candidate) =>
+      candidate.signals.some((signal) => signal.kind.startsWith("structured-patch"))),
+    false,
+  );
+});
+
+test("full evidence cwd moving to a linked worktree with the same common directory remains valid", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const linkedEvidenceFirst = \"alpha\";";
+  const secondLine = "const linkedEvidenceSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const linkedParent = await mkdtemp(path.join(os.tmpdir(), "whyline-full-linked-"));
+  const linked = path.join(linkedParent, "linked");
+  t.after(async () => rm(linkedParent, { recursive: true, force: true }));
+  await runGit(f, ["worktree", "add", "--detach", linked, commit]);
+
+  const ref = reference(f, "full-linked-cwd");
+  const summarySession = summary(ref, f.directory, commit, { sessionId: "full-linked-cwd" });
+  const fullSession = {
+    ...summarySession,
+    initialCwd: linked,
+    workingDirectories: [linked],
+  };
+  const bundle = evidence(fullSession, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(summarySession, bundle);
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "linked-worktree");
+  assert.equal(
+    report.correlation?.selected?.signals.some((signal) => signal.kind === "structured-patch-overlap"),
+    true,
+  );
+});
+
+test("full evidence cwd missing or unresolvable retains unknown conservative behavior", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const missingEvidenceFirst = \"alpha\";";
+  const secondLine = "const missingEvidenceSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const missingCwd = path.join(f.directory, "missing-evidence-cwd");
+
+  const ref = reference(f, "missing-full-cwd");
+  const session = summary(ref, f.directory, commit, { sessionId: "missing-full-cwd" });
+  const bundle = evidence(session, [firstLine, secondLine]);
+  const source = new FakeAgentHistorySource(session, {
+    ...bundle,
+    session: {
+      ...session,
+      workingDirectories: [f.directory, missingCwd],
+    },
+    evidence: [{
+      ...bundle.evidence[0]!,
+      cwd: missingCwd,
+    }],
+  });
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(report.correlation?.coverage.status, "complete");
+});
+
+test("an incompatible nested-repository distinctive patch cannot make a candidate strong", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const incompatibleFirst = \"alpha\";";
+  const secondLine = "const incompatibleSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const ref = reference(f, "nested-distinctive-patch");
+  const summarySession = summary(ref, f.directory, commit, { sessionId: "nested-distinctive-patch" });
+  const fullSession = {
+    ...summarySession,
+    initialCwd: nestedRepository,
+    workingDirectories: [nestedRepository],
+  };
+  const bundle = evidence(fullSession, [firstLine, secondLine], path.join(f.directory, "src-target.ts"));
+  const source = new FakeAgentHistorySource(summarySession, bundle);
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(source.extractionCalls, 1);
+  assert.equal(report.correlation?.alternatives.length, 0);
+});
+
+test("mixed valid and nested-repository evidence retains the valid same-repository contribution", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const mixedFirst = \"alpha\";";
+  const secondLine = "const mixedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const ref = reference(f, "mixed-repositories");
+  const session = summary(ref, f.directory, commit, { sessionId: "mixed-repositories" });
+  const validBundle = evidence(session, [firstLine, secondLine]);
+  const nestedBundle = evidence(session, [firstLine, secondLine]);
+  const validEvidence = validBundle.evidence[0]!;
+  const nestedEvidence = nestedBundle.evidence[0]!;
+  const source = new FakeAgentHistorySource(session, {
+    ...validBundle,
+    session: {
+      ...session,
+      workingDirectories: [f.directory, nestedRepository],
+    },
+    evidence: [
+      { ...validEvidence, id: "valid-evidence", cwd: f.directory },
+      { ...nestedEvidence, id: "nested-evidence", cwd: nestedRepository, sourceRecord: 20 },
+    ],
+  });
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  const overlap = report.correlation?.selected?.signals.find((signal) => signal.kind === "structured-patch-overlap");
+  assert.deepEqual(overlap?.evidenceIds, ["valid-evidence"]);
+  assert.equal(JSON.stringify(report.correlation).includes("nested-evidence"), false);
+});

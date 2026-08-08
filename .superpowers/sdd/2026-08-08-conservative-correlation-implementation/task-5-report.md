@@ -376,3 +376,66 @@ passed
 git diff --check
 passed
 ```
+
+## Recovery: full-evidence repository-context reclassification
+
+### Blocker addressed
+
+The summary-stage repository classification was retained after full extraction.
+Although the full bundle's initial cwd was rechecked for path mapping, newly
+introduced `workingDirectories`, evidence `cwd`, and absolute evidence paths
+were not all classified before projection. A nested repository could therefore
+be projected into the current repository namespace and contribute a false
+patch match.
+
+### Recovery implementation
+
+- Reclassified the full bundle's initial cwd and every working directory against
+  the current worktree/common-Git-directory model. A known incompatible primary
+  cwd makes the full candidate ineligible; valid current, linked, and
+  same-common-directory classifications update the full candidate context.
+- Reclassified each evidence cwd, resolving adapter-normalized relative cwd
+  values from the full session initial cwd. Known incompatible evidence is
+  removed before path projection and reference resolution.
+- Reclassified absolute and mapped relative evidence/patch paths from their
+  nearest existing directory. Paths known to belong to an incompatible common
+  Git directory reject that evidence; missing or unresolvable paths remain
+  unknown and cannot create a positive path signal.
+- Resolved commit references only from the filtered evidence bundle, so rejected
+  nested-repository records cannot contribute patch overlap, changed-path,
+  target-path, temporal/supporting evidence, or reference signals. Mixed
+  bundles retain independently valid same-repository evidence.
+- The pure correlation and renderer contracts still receive only projected
+  relative paths, opaque session source handles, and no absolute cwd or
+  transcript path.
+
+### Recovery regressions and TDD evidence
+
+Added five focused flow regressions covering:
+
+1. current summary cwd followed by nested unrelated full-evidence cwd;
+2. full-evidence cwd moved to a linked worktree with the same common Git
+   directory;
+3. missing/unresolvable full-evidence cwd with conservative unknown behavior;
+4. an incompatible nested-repository distinctive patch that cannot become
+   strong; and
+5. mixed valid same-repository plus incompatible nested-repository evidence,
+   retaining the valid contribution.
+
+The pre-fix focused run failed all five new cases in the expected ways: nested
+and missing evidence matched, the linked context remained labeled as the
+current worktree, incompatible distinctive evidence matched, and mixed output
+retained the rejected evidence ID. After the bounded correction and one
+self-review refinement, the focused flow run passed all 14 cases.
+
+Tasks 1–4 and Tasks 6–8 were not modified or started.
+
+### Recovery verification
+
+```text
+npm run build && node --test dist/test/provenance-correlation-flow.test.js
+14 passed, 0 failed
+
+git diff --check
+passed
+```

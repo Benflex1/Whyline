@@ -2,120 +2,194 @@
 
 ## Scope and status
 
-Task 8 was reviewed on `feat/conservative-correlation` at starting HEAD
-`6ecbf33`, using GPT-5.6 Luna Max as required. The governing specification,
-implementation plan, preflight, architecture, ledger, prior task reports, and
-the complete implementation/test set were read.
+The original Task 8 review started at `6ecbf33` on
+`feat/conservative-correlation`, using GPT-5.6 Luna Max as required. The
+governing specification, implementation plan, preflight, architecture, ledger,
+prior task reports, and complete implementation/test set were reviewed.
 
-No production behavior was changed. The plan, governing specification, and
-preflight remain unchanged. The documentation commit contains only the
-architecture corrections below and this report; no push or pull request was
-created.
+The correction round started from the Task 8 documentation commit `8819722`
+and was limited to the reviewed default-home defect and stale evidence:
+
+- `resolveCodexHome` now gives explicit `codexHome` precedence, then an
+  explicitly supplied discovery environment, then the normal process
+  `CODEX_HOME`, before falling back to the effective process home's `.codex`.
+- The CLI regression creates separate temporary `CODEX_HOME` and ambient
+  `$HOME/.codex` profiles. It requires the synthetic-home session marker and
+  rejects the ambient-profile marker, proving that a synthetic
+  `CODEX_HOME` does not consult the real/ambient profile.
+- Explicit analysis `codexHome` context and injected `AgentHistorySource`
+  precedence were left unchanged.
+
+The correction changed only `src/agents/codex/discover.ts` and
+`test/git-provenance.test.ts` in commit `8a4ca8c`. No Task 6/7 files, plan,
+governing specification, preflight, or architecture edits were made in this
+correction. No push or pull request was created.
 
 ## Documentation decision
 
-`docs/whyline-v0-architecture.md` was updated only for concrete implemented
-seams:
+The architecture changes made by the original Task 8 documentation commit
+remain accurate: they document the narrow injected history-source/history-root
+seam, the effective `CODEX_HOME`/process-home behavior, the resolved Git
+working-directory boundary, full-evidence repository reclassification, and the
+bounded integrated committed-location correlation path.
 
-- the narrow injected history-source/history-root analysis seam and the absence
-  of a general configuration or persistent-history surface;
-- the Git runner's resolved subprocess working-directory boundary, rather than
-  describing calls as literal `git -C` invocations;
-- full-evidence repository reclassification before projection, including the
-  rule that incompatible or ambiguous full-bundle context cannot be inherited
-  by cwd-less evidence and creates material coverage when relevant evidence is
-  dropped;
-- the integrated committed-location correlation behavior and its bounded,
-  coverage-gated next release-hardening step.
+No additional architecture change was established by this correction. The
+plan, governing specification, and preflight remain unchanged.
 
-## Verification
+## Correction-round verification
 
-Fresh commands completed before the documentation edit:
+All evidence in this section was captured after correction commit `8a4ca8c`
+and before this report-only refresh commit. The coordinator is responsible for
+the final broad verification; it was intentionally not repeated here.
 
-- `npm run build` — passed.
-- Focused adapter/correlation/flow/renderer/E2E command covering 81 tests —
-  81 passed, 0 failed.
-- `npm run check` — typecheck passed; full suite 110 passed, 0 failed.
-- `npm pack --dry-run --json` — passed; 119 files, 246,850-byte package,
-  1,214,549-byte unpacked size. npm emitted its non-blocking warning that no
-  `.npmignore` exists and `.gitignore` was used.
-- `git diff --check` — clean before the documentation edit.
+`npm run build`
 
-The focused coverage breakdown was: 19 adapter tests, 13 patch-overlap tests,
-10 decision-table tests, 1 target-construction test, 18 staged-flow tests, 8
-renderer tests, and 12 synthetic end-to-end tests.
+```text
+exit 0
+tsc -p tsconfig.json
+```
 
-## Operational audit
+Focused Codex-home, CLI, and precedence invocation:
 
-The requested `rg` audit and source/test review found no production path that
-executes transcript content, uses a shell, accesses a network, fetches remote
-Git data, renders scores, or persists an index/cache/SQLite store.
+```text
+node --test --test-name-pattern='CLI|discovery is recursive|committed provenance passes|uncommitted lines|untracked lines|agent source exposes' dist/test/git-provenance.test.js dist/test/codex-history.test.js dist/test/provenance-correlation-flow.test.js
+```
 
-- The only production child-process boundary is the Git runner. It passes an
-  argv array to `spawn` with `shell: false`; transcript `exec`/`custom exec`
-  records are retained only as opaque attempts and are never run or parsed as
-  shell commands.
-- `history.jsonl` is explicitly excluded from discovery and is treated as an
-  unsupported prompt index if passed directly. Tests assert that it cannot
-  become provenance evidence.
-- The renderer accepts only the normalized correlation result, uses closed-kind
-  presentation maps, and never renders prompts, reasoning, commands, output,
-  patch source, URLs, absolute transcript paths, evidence IDs, scores, or
-  probabilities/percentages. Git's separate existing report still renders its
-  bounded Git facts and target hunk.
-- Tests use temporary synthetic Codex homes or injected sources. No test uses
-  the real `~/.codex`; committed Git tests create a fixture-owned synthetic
-  home, and uncommitted/untracked flow tests make zero discovery calls.
-- Runtime source code has no SQLite, persistent cache, or index writes. Codex
-  history is scanned on demand.
-- Static remote/transport hits are fixture-only: the shallow-history Git test
-  uses a local `file://` clone to construct a temporary repository, while the
-  end-to-end analysis runner has an exact read-only allowlist that rejects
-  clone/fetch/push/remote commands. Test `execFile` use only launches the built
-  CLI and does not execute transcript commands.
+Result: exit `0`; 10 tests passed, 0 failed, 0 cancelled. This includes the
+new `CODEX_HOME` CLI regression, the normal CLI tests, discovery, injected
+source/context flow, and uncommitted/untracked no-discovery paths.
 
-## Invariant and coverage findings
+Focused privacy, transcript-operation, and renderer invocation:
 
-The focused and full suites confirm that:
+```text
+node --test --test-name-pattern='privacy-sensitive|renderer-safe|exact call IDs|custom exec|absolute patch paths|renders|plausible|ambiguous|does not claim|empty and missing' dist/test/codex-history.test.js dist/test/correlation-e2e.test.js dist/test/correlation-render.test.js
+```
 
-- known repository contradictions are excluded before scoring and cannot be
-  outweighed;
-- time-only evidence remains weak;
-- plausible-only evidence cannot select a session;
-- two strong candidates remain ambiguous;
-- uncommitted and untracked targets make no discovery call;
-- only supported successful structured update/add/delete patch variants can
-  produce direct overlap;
-- truncated relevant Git hunks block `matched` without inferring divergence;
-- candidate caps, unsupported summaries, unavailable/limited stores, partial
-  reads, changed-during-read, compaction, and ambiguous cwd-less evidence remain
-  visible as typed coverage limitations.
+Result: exit `0`; 11 tests passed, 0 failed, 0 cancelled. No transcript
+command was executed, raw command/output/patch/path data was not rendered, and
+ambiguous or plausible-only results retained their conservative status.
 
-Known v0 limitations remain those in the governing documents: the current
-adapter emits session-head context rather than a produced-commit claim; the
-parser is intentionally bounded to the observed rollout envelope; missing or
-relocated repository context may remain unknown; and incomplete evidence lowers
-coverage rather than supporting a causal claim. No blocking documentation or
-operational audit finding remains.
+`npm pack --dry-run --json` passed with the following exact package summary:
+
+```text
+npm warn gitignore-fallback No .npmignore file found, using .gitignore for file exclusion. Consider creating a .npmignore file to explicitly control published files.
+id: whyline@0.1.0
+filename: whyline-0.1.0.tgz
+size: 249477
+unpackedSize: 1224842
+shasum: 06be08899b9bb618b171d8f96b0691487fa03700
+entryCount: 119
+exit 0
+```
+
+`git diff --check && git show --check --oneline HEAD` passed with exit `0` and
+reported:
+
+```text
+8a4ca8c fix: honor CODEX_HOME in default discovery
+```
+
+## Operational audits
+
+The required broad audit invocation was run exactly as follows:
+
+```text
+rg -n "exec\(|spawn\(|shell:|history\.jsonl|~/.codex|remote|fetch|confidence|%" src test
+```
+
+It exited `0` with 31 matching lines. Review of all matches found only the
+argv Git `spawn` boundary with `shell: false`, Git format/regex syntax,
+`history.jsonl` exclusion and tests, internal confidence-band/scoring names,
+and test-only forbidden-command guards. No transcript content is executed or
+shell-parsed.
+
+Focused renderer score/probability audit:
+
+```text
+rg -n -i "score|probabil|confidence|percent|%" src/cli
+```
+
+It exited `1` with no matches. The CLI renderer therefore exposes no scores,
+confidence values, probabilities, or percentages.
+
+Focused persistence audit:
+
+```text
+rg -n -i "sqlite|sqlite3|better-sqlite|appendFile|createWriteStream|writeFile|cache|index\.db" src
+```
+
+It exited `1` with no matches. Runtime source has no SQLite, persistent cache,
+or index write path.
+
+Focused effective-home audit:
+
+```text
+rg -n -i "os\.homedir|CODEX_HOME|/\.codex|~/.codex" src test
+```
+
+It exited `0` with 8 matches, all limited to the process-home/CODEX_HOME
+resolver and temporary synthetic-home fixtures. No literal real profile path
+is used by tests.
+
+Focused production network/remote-Git audits:
+
+```text
+rg -n -i 'file://|https?://' src
+rg -n -i 'git (fetch|push|pull|clone|remote)' src
+```
+
+Both exited `1` with no matches. The only static transport hits in tests are
+the local `file://` shallow-clone fixture and synthetic URL/remote-leakage
+sentinels; the analysis runner's read-only Git allowlist rejects clone,
+fetch, push, and remote operations.
+
+Focused child-process audit:
+
+```text
+rg -n 'spawn\(|shell:' src/git src/agents src/cli src/provenance
+```
+
+It exited `0` with only the Git runner's `spawn` call and explicit
+`shell: false`. Codex transcript `exec` and `custom exec` records remain
+opaque evidence attempts and never enter this process boundary.
+
+Tests use temporary synthetic Codex homes or injected sources. The new CLI
+test specifically places an ambient marker under a temporary `$HOME/.codex`
+and asserts that only the `CODEX_HOME` marker is rendered; it never opens the
+real `/home/benjamin/.codex` profile.
+
+## Coverage findings
+
+The current focused runs verify the load-bearing correction and the adjacent
+operational boundaries. The existing implementation/test set continues to
+cover conservative repository compatibility, structured patch-side matching,
+ambiguous and plausible-only outcomes, bounded rendering, partial/changed
+transcripts, and Git-only behavior for uncommitted or untracked targets. The
+correction did not alter those correlation rules.
+
+The full suite and whole-branch review are intentionally deferred to the
+coordinator's one final verification pass. No unrelated production behavior or
+Task 6/7 work was started.
+
+Known v0 limitations remain unchanged: the adapter emits session-head context
+rather than a produced-commit claim; transcript parsing is bounded to the
+observed rollout envelope; missing or relocated repository context can remain
+unknown; and incomplete evidence lowers coverage instead of supporting a
+causal claim.
 
 ## Git handoff
 
-At audit start the local branch was ahead of
-`origin/feat/conservative-correlation` by 24 commits at `6ecbf33`. The
-documentation commit leaves the remote branch unchanged and the local branch
-one commit further ahead. Push and coordinator-owned final verification were
-intentionally not performed, as requested. The requested history, feature-diff
-stat, and status summaries were inspected locally before handoff.
-
-### Requested Git summaries
-
-The following exact summaries were captured after the initial local Task 8
-commit and before the final same-message report amend:
+The exact Git summaries below were captured after correction commit `8a4ca8c`
+and before this report-only refresh commit. This evidence boundary is stated
+explicitly because committing this report necessarily advances `HEAD`; the
+package and audit results above describe the corrected implementation commit,
+not an unrun post-report full suite.
 
 `git log --oneline --decorate -n 15`
 
 ```text
-713d428 (HEAD -> feat/conservative-correlation) docs: record integrated correlation behavior
+8a4ca8c (HEAD -> feat/conservative-correlation) fix: honor CODEX_HOME in default discovery
+8819722 docs: record integrated correlation behavior
 6ecbf33 test: close Task 7 e2e review gaps
 8f2c394 test: cover staged Git Codex correlation
 0e5da30 fix: harden bounded Codex correlation rendering
@@ -129,18 +203,17 @@ a4219e7 feat: render bounded Codex correlation evidence
 8db8ba4 fix: harden staged Codex correlation
 46d0f23 feat: stage Codex correlation from Git provenance
 a3bd854 fix: derive limited coverage status
-3f8e8e4 fix: address conservative correlation review findings
 ```
 
 `git diff --stat main...HEAD`
 
 ```text
-33 files changed, 8273 insertions(+), 56 deletions(-)
+33 files changed, 8413 insertions(+), 57 deletions(-)
 ```
 
-The complete command output listed the Task 8 report, architecture, governing
-spec/plan, prior task reports, correlation implementation, and test files; no
-unrelated production files were present.
+The complete stat listed only the existing Task 5–8 documentation/spec/plan
+artifacts, correlation implementation/tests, and the intended correction
+files; no unrelated production area was changed.
 
 `git status --short`
 
@@ -148,6 +221,7 @@ unrelated production files were present.
 (empty)
 ```
 
-The remote-tracking ref remained `origin/feat/conservative-correlation` at
-`004fb49`; the local branch was `[ahead 25]`. The amend changes the local
-commit hash but does not change this remote state or introduce a push.
+The remote-tracking ref was
+`origin/feat/conservative-correlation` at `004fb494be84b154a8909e4dbda2f69222271420`.
+At the evidence boundary the local branch was ahead by 26 commits. No push or
+pull request was created.

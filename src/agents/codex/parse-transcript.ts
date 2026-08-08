@@ -29,6 +29,8 @@ export interface TranscriptRecord {
 
 export interface TranscriptRecordContext {
   readonly session: AgentSessionSummary;
+  /** The latest cwd from a supported structured transcript record. */
+  readonly effectiveCwd: string | undefined;
   addDiagnostic(value: AgentDiagnostic): void;
 }
 
@@ -123,6 +125,7 @@ class SummaryBuilder {
   private startedAt: string | undefined;
   private observedThroughAt: string | undefined;
   private initialCwd: string | undefined;
+  private effectiveCwd: string | undefined;
   private readonly workingDirectories: string[] = [];
   private adapterSchema = "codex-rollout-envelope";
   private surface: string | undefined;
@@ -178,6 +181,10 @@ class SummaryBuilder {
     }
   }
 
+  public currentEffectiveCwd(): string | undefined {
+    return this.effectiveCwd;
+  }
+
   public snapshot(): AgentSessionSummary {
     const optional: {
       -readonly [Key in keyof AgentSessionSummary]?: AgentSessionSummary[Key]
@@ -212,6 +219,13 @@ class SummaryBuilder {
     }
   }
 
+  private observeEffectiveCwd(value: unknown): void {
+    const cwd = safeAbsolutePath(value);
+    if (cwd !== undefined) {
+      this.effectiveCwd = cwd;
+    }
+  }
+
   private observeSessionMeta(
     payload: JsonRecord,
     outerTimestamp: string | undefined,
@@ -237,6 +251,7 @@ class SummaryBuilder {
     if (this.initialCwd === undefined && cwd !== undefined) {
       this.initialCwd = cwd;
     }
+    this.observeEffectiveCwd(cwd);
     this.addWorkingDirectory(cwd);
 
     const originator = safeToken(payload.originator);
@@ -311,6 +326,7 @@ class SummaryBuilder {
   }
 
   private observeTurnContext(payload: JsonRecord): void {
+    this.observeEffectiveCwd(payload.cwd);
     this.addWorkingDirectory(payload.cwd);
     const model = safeToken(payload.model, 256);
     if (model !== undefined) {
@@ -335,6 +351,8 @@ class SummaryBuilder {
         break;
       case "thread_settings_applied": {
         const settings = getRecord(payload, "thread_settings");
+        this.observeEffectiveCwd(payload.cwd);
+        this.observeEffectiveCwd(settings?.cwd);
         this.addWorkingDirectory(payload.cwd);
         this.addWorkingDirectory(settings?.cwd);
         break;
@@ -641,6 +659,7 @@ export async function parseTranscript(
     if (options.onRecord !== undefined) {
       await options.onRecord(record, {
         session: builder.snapshot(),
+        effectiveCwd: builder.currentEffectiveCwd(),
         addDiagnostic: (value) => builder.addDiagnostic(value),
       });
     }

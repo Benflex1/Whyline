@@ -77,7 +77,7 @@ function patchInputPaths(
   input: unknown,
   sessionCwd: string | undefined,
 ): PatchAttempt {
-  if (typeof input !== "string") {
+  if (typeof input !== "string" || sessionCwd === undefined) {
     return { paths: [] };
   }
 
@@ -149,6 +149,9 @@ function recoverPatchChange(
   rawChange: unknown,
   sessionCwd: string | undefined,
 ): AgentPatchChange | undefined {
+  if (sessionCwd === undefined) {
+    return undefined;
+  }
   const pathValue = normalizeEventPath(rawPath, sessionCwd);
   if (pathValue === undefined) {
     return undefined;
@@ -356,7 +359,9 @@ class EvidenceCollector {
 
     if (name === "exec_command") {
       const args = parseJsonArguments(record.payload.arguments, context, record.recordNumber);
-      const workdir = args === undefined ? undefined : normalizeEventCwd(args.workdir, context.session.initialCwd);
+      const workdir = args === undefined
+        ? undefined
+        : normalizeEventCwd(args.workdir, context.effectiveCwd);
       const evidenceIndex = this.addEvidence({
         kind: "command-attempt",
         occurredAt: record.timestamp,
@@ -414,10 +419,11 @@ class EvidenceCollector {
     }
 
     if (name === "apply_patch") {
-      const attempt = patchInputPaths(record.payload.input, context.session.initialCwd);
+      const attempt = patchInputPaths(record.payload.input, context.effectiveCwd);
       const evidenceIndex = this.addEvidence({
         kind: "patch-attempt",
         occurredAt: record.timestamp,
+        ...(context.effectiveCwd === undefined ? {} : { cwd: context.effectiveCwd }),
         paths: attempt.paths,
         operation: "patch",
         callId,
@@ -460,7 +466,7 @@ class EvidenceCollector {
 
     const changes = recoverPatchChanges(
       record.payload.changes,
-      context.session.initialCwd,
+      context.effectiveCwd,
       context,
       record.recordNumber,
     );
@@ -476,6 +482,7 @@ class EvidenceCollector {
     this.addEvidence({
       kind: "patch-result",
       occurredAt: record.timestamp,
+      ...(context.effectiveCwd === undefined ? {} : { cwd: context.effectiveCwd }),
       paths,
       operation: "patch",
       callId,

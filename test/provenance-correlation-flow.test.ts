@@ -16,6 +16,7 @@ import type {
   AgentSessionRef,
   AgentSessionSummary,
 } from "../src/agents/agent-history-source.js";
+import { CodexHistorySource } from "../src/agents/codex/source.js";
 import { GitProcess } from "../src/git/git-process.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
 import type { WhylineReport } from "../src/provenance/model.js";
@@ -176,6 +177,86 @@ function evidenceWithoutCwd(bundle: AgentEvidenceBundle): AgentEvidenceBundle {
   };
 }
 
+interface RealCodexPatchTranscriptOptions {
+  readonly sessionId: string;
+  readonly commitHash: string;
+  readonly sessionCwd?: string;
+  readonly contextCwds?: readonly string[];
+  readonly patchPath: string;
+  readonly firstLine: string;
+  readonly secondLine: string;
+}
+
+async function writeRealCodexPatchTranscript(
+  codexHome: string,
+  options: RealCodexPatchTranscriptOptions,
+): Promise<void> {
+  const transcriptPath = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "08",
+    "08",
+    `${options.sessionId}.jsonl`,
+  );
+  await mkdir(path.dirname(transcriptPath), { recursive: true });
+  const sessionPayload: Record<string, unknown> = {
+    session_id: options.sessionId,
+    timestamp: "2026-08-08T01:34:54.000Z",
+    git: { commit_hash: options.commitHash },
+  };
+  if (options.sessionCwd !== undefined) {
+    sessionPayload.cwd = options.sessionCwd;
+  }
+  const records: unknown[] = [{
+    timestamp: "2026-08-08T01:34:54.000Z",
+    type: "session_meta",
+    payload: sessionPayload,
+  }];
+  for (const [index, cwd] of (options.contextCwds ?? []).entries()) {
+    records.push({
+      timestamp: `2026-08-08T01:34:${String(55 + index).padStart(2, "0")}.000Z`,
+      type: "turn_context",
+      payload: { cwd },
+    });
+  }
+  records.push({
+    timestamp: "2026-08-08T01:35:00.000Z",
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call",
+      call_id: `${options.sessionId}-patch-call`,
+      name: "apply_patch",
+      input: "*** Begin Patch\n*** Update File: src-target.ts\n*** End Patch",
+    },
+  });
+  records.push({
+    timestamp: "2026-08-08T01:35:01.000Z",
+    type: "event_msg",
+    payload: {
+      type: "patch_apply_end",
+      call_id: `${options.sessionId}-patch-call`,
+      status: "completed",
+      success: true,
+      changes: {
+        [options.patchPath]: {
+          type: "update",
+          unified_diff: [
+            "@@ -0,0 +1,2 @@",
+            `+${options.firstLine}`,
+            `+${options.secondLine}`,
+          ].join("\n"),
+        },
+      },
+    },
+  });
+  await writeFile(
+    transcriptPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
+  );
+}
+
 interface FakeAgentHistoryOptions {
   readonly availability?: AgentHistoryAvailability;
   readonly diagnostics?: readonly AgentDiagnostic[];
@@ -326,6 +407,267 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   const serializedCorrelation = JSON.stringify(report.correlation);
   assert.equal(serializedCorrelation.includes(f.directory), false);
   assert.equal(serializedCorrelation.includes("synthetic-home"), false);
+});
+
+test("real Codex adapter preserves deleted historical cwd for a cwd-less patch result", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const realHistoricalFirst = \"alpha\";";
+  const secondLine = "const realHistoricalSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+
+  const historicalParent = await mkdtemp(path.join(os.tmpdir(), "whyline-real-historical-"));
+  const historicalCwd = path.join(historicalParent, "deleted-worktree");
+  await mkdir(historicalCwd, { recursive: true });
+  await rm(historicalCwd, { recursive: true, force: true });
+  t.after(async () => rm(historicalParent, { recursive: true, force: true }));
+
+  const codexHome = path.join(f.directory, "synthetic-codex-home");
+  const transcriptPath = path.join(
+    codexHome,
+    "sessions",
+    "2026",
+    "08",
+    "08",
+    "rollout-real-historical.jsonl",
+  );
+  await mkdir(path.dirname(transcriptPath), { recursive: true });
+  const records = [
+    {
+      timestamp: "2026-08-08T01:34:54.000Z",
+      type: "session_meta",
+      payload: {
+        session_id: "real-deleted-historical",
+        timestamp: "2026-08-08T01:34:54.000Z",
+        cwd: historicalCwd,
+        git: { commit_hash: commit },
+      },
+    },
+    {
+      timestamp: "2026-08-08T01:34:55.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        call_id: "call-real-historical-patch",
+        name: "apply_patch",
+        input: "*** Begin Patch\n*** Update File: src-target.ts\n*** End Patch",
+      },
+    },
+    {
+      timestamp: "2026-08-08T01:34:56.000Z",
+      type: "event_msg",
+      payload: {
+        type: "patch_apply_end",
+        call_id: "call-real-historical-patch",
+        status: "completed",
+        success: true,
+        changes: {
+          [path.join(historicalCwd, "src-target.ts")]: {
+            type: "update",
+            unified_diff: [
+              "@@ -0,0 +1,2 @@",
+              `+${firstLine}`,
+              `+${secondLine}`,
+            ].join("\n"),
+          },
+        },
+      },
+    },
+  ];
+  await writeFile(transcriptPath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+
+  const source = new CodexHistorySource();
+  const discovery = await source.discoverWithDiagnostics({ historyRoot: codexHome });
+  assert.equal(discovery.refs.length, 1);
+  const bundle = await source.extractEvidence(discovery.refs[0]!);
+  const patchResult = bundle.evidence.find((value) => value.kind === "patch-result");
+  assert.equal(bundle.session.initialCwd, historicalCwd);
+  assert.equal(patchResult?.cwd, historicalCwd);
+
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.session.sessionId, "real-deleted-historical");
+});
+
+test("real Codex adapter attributes a cwd-less patch to the later nested repository cwd", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const realNestedFirst = \"alpha\";";
+  const secondLine = "const realNestedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+
+  const codexHome = path.join(f.directory, "synthetic-codex-home");
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-nested-cwd",
+    commitHash: commit,
+    sessionCwd: f.directory,
+    contextCwds: [nestedRepository],
+    patchPath: path.join(nestedRepository, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+
+  const source = new CodexHistorySource();
+  const discovery = await source.discoverWithDiagnostics({ historyRoot: codexHome });
+  const bundle = await source.extractEvidence(discovery.refs[0]!);
+  const patchResult = bundle.evidence.find((value) => value.kind === "patch-result");
+  assert.equal(patchResult?.cwd, nestedRepository);
+  assert.equal(patchResult?.patch?.changes[0]?.path, "src-target.ts");
+
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 0);
+});
+
+test("real Codex adapter keeps a cwd-less patch eligible across a linked worktree", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const realLinkedFirst = \"alpha\";";
+  const secondLine = "const realLinkedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const linkedParent = await mkdtemp(path.join(os.tmpdir(), "whyline-real-linked-"));
+  const linked = path.join(linkedParent, "linked");
+  t.after(async () => rm(linkedParent, { recursive: true, force: true }));
+  await runGit(f, ["worktree", "add", "--detach", linked, commit]);
+
+  const codexHome = path.join(f.directory, "synthetic-codex-home");
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-linked-cwd",
+    commitHash: commit,
+    sessionCwd: f.directory,
+    contextCwds: [linked],
+    patchPath: path.join(linked, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+
+  const source = new CodexHistorySource();
+  const discovery = await source.discoverWithDiagnostics({ historyRoot: codexHome });
+  const bundle = await source.extractEvidence(discovery.refs[0]!);
+  const patchResult = bundle.evidence.find((value) => value.kind === "patch-result");
+  assert.equal(patchResult?.cwd, linked);
+
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.session.sessionId, "real-linked-cwd");
+});
+
+test("real Codex adapter quarantines a patch when no structured cwd is known", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const realUnknownFirst = \"alpha\";";
+  const secondLine = "const realUnknownSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const codexHome = path.join(f.directory, "synthetic-codex-home");
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-unknown-cwd",
+    commitHash: commit,
+    patchPath: path.join(f.directory, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+
+  const source = new CodexHistorySource();
+  const discovery = await source.discoverWithDiagnostics({ historyRoot: codexHome });
+  const bundle = await source.extractEvidence(discovery.refs[0]!);
+  const patchResult = bundle.evidence.find((value) => value.kind === "patch-result");
+  assert.equal(patchResult?.cwd, undefined);
+  assert.deepEqual(patchResult?.patch?.changes, []);
+
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(report.correlation?.coverage.status, "limited");
+  assert.equal(
+    report.correlation?.coverage.limitations.some((value) => value.kind === "summary-coverage" && value.material),
+    true,
+  );
+});
+
+test("real adapter mixed evidence keeps valid attribution, rejects mismatch, and quarantines unknown cwd", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const realMixedFirst = \"alpha\";";
+  const secondLine = "const realMixedSecond = \"beta\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const nestedRepository = path.join(f.directory, "nested-repository");
+  await mkdir(nestedRepository, { recursive: true });
+  await runGit(f, ["init", "--initial-branch=nested", nestedRepository]);
+  const codexHome = path.join(f.directory, "synthetic-codex-home");
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-mixed-valid",
+    commitHash: commit,
+    sessionCwd: f.directory,
+    patchPath: path.join(f.directory, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-mixed-incompatible",
+    commitHash: commit,
+    sessionCwd: nestedRepository,
+    patchPath: path.join(nestedRepository, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+  await writeRealCodexPatchTranscript(codexHome, {
+    sessionId: "real-mixed-unknown",
+    commitHash: commit,
+    patchPath: path.join(f.directory, "src-target.ts"),
+    firstLine,
+    secondLine,
+  });
+
+  const source = new CodexHistorySource();
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome,
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  assert.equal(report.correlation?.selected, undefined);
+  assert.equal(
+    report.correlation?.alternatives.some((candidate) => candidate.session.sessionId === "real-mixed-valid"),
+    true,
+  );
+  assert.equal(
+    report.correlation?.alternatives.some((candidate) => candidate.session.sessionId === "real-mixed-incompatible"),
+    false,
+  );
+  assert.equal(
+    report.correlation?.coverage.limitations.some((value) => value.kind === "summary-coverage" && value.material),
+    true,
+  );
 });
 
 test("rebases evidence paths from a nested historical session cwd", async (t) => {

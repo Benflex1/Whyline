@@ -103,7 +103,8 @@ function evidenceMayAffectCorrelation(
   evidence: AgentEvidenceBundle["evidence"][number],
 ): boolean {
   if (evidence.commitIds.length > 0) return true;
-  if (evidence.kind !== "patch-attempt" && evidence.kind !== "patch-result") return false;
+  if (evidence.kind === "patch-result") return evidence.patch !== undefined || evidence.paths.length > 0;
+  if (evidence.kind !== "patch-attempt") return false;
   return evidence.paths.length > 0 || (evidence.patch?.changes.length ?? 0) > 0;
 }
 
@@ -659,7 +660,9 @@ async function classifyRepository(
     repositoryMatch: foundIncompatible ? "incompatible" : match,
     pathMapping,
     initialResolution,
-    cwdlessResolution: foundIncompatible || foundUnresolved ? null : initialResolution,
+    cwdlessResolution: foundIncompatible || foundUnresolved || directories.length === 0
+      ? null
+      : initialResolution,
   };
 }
 

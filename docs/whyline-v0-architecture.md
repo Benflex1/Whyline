@@ -99,6 +99,7 @@ src/
       parse-transcript.ts   version-tolerant streaming parser
       extract-evidence.ts   Codex records to normalized evidence
   correlation/
+    model.ts                Git target, signal, candidate, and coverage types
     build-candidates.ts     eligibility and cheap filtering
     score-candidate.ts      signal calculation and confidence gates
     correlate.ts            selection versus ambiguity
@@ -117,23 +118,56 @@ Keep files focused, but do not create packages, dependency-injection machinery, 
 
 The Git subprocess boundary should accept an explicit repository/worktree directory and an argument array, and return raw stdout bytes, stderr, and exit status. Parsers own decoding. This prevents locale, quoting, and shell-expansion bugs.
 
+The agent extraction hint is deliberately separate from the rich correlation
+target owned by `src/correlation/model.ts`:
+
+```ts
+interface AgentEvidenceTarget {
+  repositoryPath?: string;
+  line?: number;
+  worktreeRoot?: string;
+}
+
+type AgentHistoryAvailability = "available" | "limited" | "unavailable";
+
+interface AgentHistoryDiscoveryResult {
+  availability: AgentHistoryAvailability;
+  refs: AgentSessionRef[];
+  diagnostics: AgentDiagnostic[];
+}
+
+interface AgentHistoryDiscoveryContext {
+  historyRoot?: string;
+}
+```
+
 The only agent abstraction needed now is:
 
 ```ts
 interface AgentHistorySource {
   readonly id: "codex" | string;
-  discover(context: RepositoryContext): AsyncIterable<AgentSessionRef>;
+  discover(context?: AgentHistoryDiscoveryContext): AsyncIterable<AgentSessionRef>;
+  discoverWithDiagnostics?(context?: AgentHistoryDiscoveryContext): Promise<AgentHistoryDiscoveryResult>;
   readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary>;
   extractEvidence(
     ref: AgentSessionRef,
-    target: CorrelationTarget,
+    target?: AgentEvidenceTarget,
   ): Promise<AgentEvidenceBundle>;
 }
 ```
 
 `discover` locates source records, `readSummary` extracts cheap candidate metadata, and `extractEvidence` performs the expensive stream pass. Correlation remains agent-neutral and consumes normalized evidence; Codex-specific event names and JSON shapes do not escape the adapter.
 
+`CorrelationTarget` is the rich Git-derived value consumed by the pure
+correlation layer. It is not the adapter extraction hint and is not passed as a
+Codex parser structure.
+
 The adapter must expose parser diagnostics and coverage gaps. Unknown records are skipped and counted, not treated as evidence and not fatal unless required session identity cannot be established.
+
+Discovery must also distinguish a readable source with zero refs from a limited
+or unavailable source. A readable Codex home with readable stores and no
+transcripts is `available`; a readable home with partially unreadable stores is
+`limited`; an unavailable or unreadable effective home is `unavailable`.
 
 ### Data flow
 
@@ -233,6 +267,7 @@ interface AgentSessionSummary {
   transcriptGit?: {
     branch?: string;
     commitHash?: string;
+    referenceKind?: "session-head" | "produced-commit" | "unknown";
   };
   isPartial: boolean;
   diagnostics: AgentDiagnostic[];
@@ -252,6 +287,17 @@ type AgentOperation =
   | "patch"
   | "mcp";
 
+type AgentCommitReferenceKind = "session-head" | "produced-commit" | "unknown";
+
+interface AgentPatchHunkRange {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+}
+
+type AgentPatchMatchSide = "added" | "deleted" | "content";
+
 interface AgentPatchChange {
   path: string;
   changeType: "update" | "add" | "delete" | "unknown";
@@ -259,9 +305,24 @@ interface AgentPatchChange {
   payloadRecovered: boolean;
   payloadFingerprint: string;
   payloadTruncated: boolean;
+  /** Compatibility field; correlation uses the explicit side fields below. */
   addedLineFingerprints: string[];
+  matchLineFingerprints: string[];
+  distinctiveLineFingerprints: string[];
+  matchSide: AgentPatchMatchSide;
+  hunkRanges: AgentPatchHunkRange[];
   lineCount: number;
+  movedFrom?: string;
 }
+
+// `matchLineFingerprints` and `matchSide` are normalized together:
+// update/unified-diff uses added lines, add/content uses post-image content, and
+// delete/content uses deleted content. `distinctiveLineFingerprints` is the
+// bounded subset that passes the non-boilerplate classification used to prove
+// two-line overlap or content divergence. `hunkRanges` contains only numeric
+// unified-diff coordinates; raw patch/source text is not retained.
+// `addedLineFingerprints` remains a compatibility field and is not used to
+// infer delete semantics.
 
 interface AgentPatchEvidence {
   callId: string;
@@ -283,10 +344,17 @@ interface AgentEvidence {
   reportedSuccess?: boolean;
   status?: string;
   patch?: AgentPatchEvidence;
+  commitReferenceKind?: AgentCommitReferenceKind;
   commitIds: string[];
   extraction: "structured";
   sourceRecord: number;
 }
+
+// The current adapter will mark `session_meta.payload.git.commit_hash` and its
+// normalized `git-revision-reference` evidence as
+// `commitReferenceKind: "session-head"`. This is repository/HEAD context, not a
+// claim that the session produced the commit. `produced-commit` is reserved for
+// a future empirically verified reference kind.
 
 type AgentDiagnosticKind =
   | "unknown-record"
@@ -319,28 +387,74 @@ interface AgentEvidenceBundle {
   diagnostics: AgentDiagnostic[];
 }
 
+type CorrelationSignalKind =
+  | "session-head-target-reference"
+  | "produced-target-commit-reference"
+  | "historical-commit-reference"
+  | "structured-patch-overlap"
+  | "exact-current-worktree"
+  | "linked-worktree-common-directory"
+  | "structured-patch-target-path"
+  | "changed-path-overlap"
+  | "structured-patch-attempt-target-path"
+  | "temporal-proximity"
+  | "structured-content-divergence";
+
 interface CorrelationSignal {
-  kind: string;
+  kind: CorrelationSignalKind;
   weight: number;
   basis: ClaimBasis;
-  explanation: string;
   evidenceIds: string[];
 }
 
 interface CorrelationCandidate {
   session: AgentSessionSummary;
   eligible: boolean;
+  repositoryMatch: "current-worktree" | "linked-worktree" | "same-common-directory" | "historical-commit-anchored" | "unknown" | "incompatible";
   score: number;              // internal ordering only
   signals: CorrelationSignal[];
   contradictions: CorrelationSignal[];
   band: "strong" | "plausible" | "weak";
+  coverage: "complete" | "limited";
+  coverageLimitations: CorrelationLimitation[];
+}
+
+type CorrelationLimitationKind =
+  | "empty-readable-store"
+  | "discovery-unavailable"
+  | "discovery-limited"
+  | "unsupported-summary"
+  | "unresolved-repository-candidate"
+  | "candidate-cap"
+  | "summary-coverage"
+  | "partial-transcript"
+  | "corrupt-transcript"
+  | "changed-during-read"
+  | "truncated-git-hunk"
+  | "truncated-patch-payload"
+  | "material-compaction"
+  | "material-rollback-or-abort";
+
+interface CorrelationLimitation {
+  kind: CorrelationLimitationKind;
+  material: boolean;
+  count?: number;
+}
+
+interface CorrelationCoverage {
+  status: "complete" | "limited" | "unavailable";
+  discoveredRefs: number;
+  summaryEligibleRefs: number;
+  fullyExtractedRefs: number;
+  omittedEligibleRefs: number;
+  limitations: CorrelationLimitation[];
 }
 
 interface CorrelationResult {
   status: "matched" | "ambiguous" | "none" | "unavailable";
   selected?: CorrelationCandidate;
   alternatives: CorrelationCandidate[];
-  explanation: string[];
+  coverage: CorrelationCoverage;
 }
 ```
 
@@ -348,6 +462,11 @@ interface CorrelationResult {
 a source without it is an unsupported/diagnostic result, never a filename-based
 session. A subagent transcript is a separate `AgentSessionSummary` and retains
 its observed parent/fork IDs rather than being flattened into the root session.
+
+Correlation signals expose closed kinds and evidence identifiers rather than
+free-form renderer messages. The terminal renderer maps signal, limitation, and
+result-status kinds to fixed bounded explanations and never renders arbitrary
+domain keys or transcript-derived prose.
 
 Do not persist `lineDigest` as the identity of a line. Lines are not durable entities across edits. It is only useful during one analysis for exact comparisons.
 
@@ -359,8 +478,8 @@ Scoring cannot repair an identity mistake. Apply these gates first:
 
 1. A session with a known, incompatible repository identity is excluded even if relative paths and timestamps match.
 2. Prefer a canonical worktree match. Treat any cwd belonging to a worktree returned by `git worktree list --porcelain -z` as belonging to the same repository, while retaining which worktree produced the evidence.
-3. If the recorded cwd no longer exists, an exact historical root string or transcript-recorded commit reference may keep the candidate eligible as supporting evidence, but transcript cwd/branch/commit metadata never establishes durable repository identity or `commonGitDir`; path basename alone never establishes repository identity.
-4. A session with no usable repository signal may be listed as weak only when it contains the exact target commit ID. It cannot be selected automatically.
+3. If the recorded cwd no longer exists, a session-head commit reference or another future normalized repository/commit anchor may keep the candidate eligible for bounded evaluation, but transcript cwd/branch/session-head metadata never establishes durable repository identity or `commonGitDir`; path basename alone never establishes repository identity.
+4. The observed `session_meta.payload.git.commit_hash` is session-head context, not evidence that the session produced the commit. With unknown repository context it can participate in a historical conjunction with distinctive structured patch overlap, but it cannot select a candidate by itself. A future empirically verified produced-commit reference may be a direct anchor.
 5. Time is never an eligibility requirement. Rebases, squash merges, delayed commits, and amended commits make commit times unreliable causal boundaries.
 
 Transcript repository URLs are never retained or rendered. Git-side repository
@@ -374,39 +493,49 @@ Use an explainable additive score only to order candidates within confidence gat
 
 | Signal | Weight | Notes |
 | --- | ---: | --- |
-| Exact target commit ID referenced in same-repository evidence | +10 | Strongest direct anchor; abbreviated IDs must resolve uniquely in this repository |
-| Agent patch/post-image overlaps the relevant commit hunk | +8 | Compare normalized added-line fingerprints; require enough nontrivial content to avoid boilerplate matches |
+| Target session-head commit context resolves to the attributed commit | +2 | Cheap ranking/summary anchor only; not a current-v0 direct change anchor |
+| Empirically verified produced-commit reference resolves to the attributed commit | +10 | Reserved for a future structured reference kind; abbreviated IDs must resolve uniquely in this repository |
+| Agent patch/post-image overlaps the relevant commit hunk | +8 | Compare operation-appropriate normalized line fingerprints; require at least two distinctive lines |
 | Exact target worktree identity | +5 | Use canonical path plus Git worktree mapping |
 | Same common Git directory through another known worktree | +4 | Important for Codex-managed detached worktrees |
-| Recorded patch attempt or recovered patch change for the blamed path | +4 | Only supported patch variants supply structured change data; resolve paths relative to the session/event cwd |
+| Successful recovered structured patch affects the blamed path | +4 | Only supported patch variants supply structured change data; resolve paths relative to the session/event cwd |
 | Meaningful overlap with the commit's changed-file set | +1 to +3 | Based on overlap size; filenames alone are not decisive |
-| Recorded command attempt referencing the target or nearby changed files | +1 | Supporting evidence only; do not shell-parse command text |
-| Structured transcript Git commit metadata resolving to the target | +4 | Optional SHA evidence; it does not establish repository identity or a successful shell command |
-| Recorded relevant test/lint command attempt | +1 | Explains attempted verification only; observed schemas do not provide stable shell success status |
 | Temporal proximity | 0 to +2 | Bounded weak signal; use session interval versus author and committer times |
-| Explicit conflicting commit/repository evidence | -10 or exclusion | Prefer exclusion for known repository mismatch |
-| Same file but patch content contradicts target hunk | -5 | Protects against multiple sessions touching the same file |
+| Known incompatible repository identity | exclusion | Resolve before scoring; no additive score can repair the identity contradiction |
+| `structured-content-divergence` | -5 | Only supported competing content that is operation-, hunk-, and chronology-aware; truncation suppresses this inference |
 
-Patch fingerprints should normalize line endings and insignificant diff metadata, but should not normalize identifiers, literals, or broad whitespace so aggressively that unrelated edits collide. Require at least two distinctive added lines or another direct anchor before treating content overlap as strong.
+Patch fingerprints should normalize line endings and insignificant diff metadata, but should not normalize identifiers, literals, or broad whitespace so aggressively that unrelated edits collide. Require at least two distinctive matching lines from a supported successful structured patch. The current session-head reference is contextual and does not satisfy the direct-anchor requirement.
+
+Content divergence is not inferred from a same-file path alone. A supported
+successful change must contain two distinctive lines, target the relevant hunk,
+and lack direct overlap; a later direct match supersedes an earlier divergence,
+while a later competing change remains active. When a relevant Git hunk is
+truncated, absence of overlap cannot establish divergence.
 
 ### Confidence bands and ambiguity
 
 The report should never display `83% confidence`. The inputs are incomplete and correlated, so that number would imply calibration that does not exist.
 
-- **Strong:** exact repository identity plus at least one direct change anchor: target commit reference or distinctive supported patch/post-image overlap. No material contradiction.
+- **Strong:** credible repository compatibility plus qualifying distinctive supported patch/post-image overlap. The current session-head commit reference is contextual only; a future produced-commit reference may become a direct anchor after empirical verification. No material contradiction.
 - **Plausible:** exact repository identity plus at least two independent supporting signals, at least one involving a write or changed-set overlap. Time plus same filename is not enough.
 - **Weak:** everything else that survives eligibility.
 
 Select a session only when exactly one candidate is `strong`. If two candidates are strong, return `ambiguous` regardless of score. A lone plausible candidate may be displayed under `Possible Codex session`, never as the source. Weak candidates should normally be summarized as no reliable match.
 
+Selection also requires complete candidate-set coverage. One strong candidate
+with a material transcript, discovery, or relevant-Git-hunk limitation returns
+`none` with possible evidence retained; it is not promoted to `matched`. An
+empty readable Codex store returns `none`, while `unavailable` is reserved for
+an unreadable or unavailable effective history source.
+
 This rule deliberately sacrifices recall. A false causal story is worse than a Git-only answer.
 
 ### How the model survives history rewriting
 
-- **Rebase/amend:** current commit IDs and committer timestamps may differ from the session. Worktree identity, changed paths, and hunk overlap remain useful; stale SHA references are supporting or contradictory context, not an automatic match.
+- **Rebase/amend:** current commit IDs and committer timestamps may differ from the session. Worktree identity, changed paths, and hunk overlap remain useful; stale session-head SHA references are contextual evidence, not an automatic match.
 - **Squash merge:** several sessions may overlap one final commit. The result remains ambiguous unless one has distinctive hunk overlap and the others do not. v0 does not divide a commit among sessions line by line beyond the queried hunk.
 - **Human edits after agent work:** reduced or contradictory hunk overlap lowers confidence. Whyline can say the session is plausible evidence without claiming the final line is agent-authored.
-- **Multiple sessions on the same code:** direct hunk overlap and commit references outrank time. Multiple strong candidates remain visible as ambiguity.
+- **Multiple sessions on the same code:** direct hunk overlap outranks session-head context and time. Multiple strong candidates remain visible as ambiguity.
 - **Session without a commit:** it can still match through repository, supported patch evidence, and changed-set overlap.
 - **Missing/truncated history:** report adapter coverage limitations; absence of evidence is not evidence of human authorship.
 
@@ -492,7 +621,13 @@ git diff --no-ext-diff --no-color --find-renames --unified=3 \
   <parent> <commit> -- <relevant-paths...>
 ```
 
-For a root commit, use `git diff-tree --root` or compare with the object-format-appropriate empty tree resolved by Git. Parse name-status as NUL records, including both source and destination for `R` and `C`. Parse unified hunk headers only for locating the target hunk; preserve raw hunk text as evidence and never use terminal-rendered output.
+For a root commit, use `git diff-tree --root` or compare with the object-format-appropriate empty tree resolved by Git. Parse name-status as NUL records, including both source and destination for `R` and `C`. Parse unified hunk headers for locating the target hunk and retain the existing bounded Git hunk representation for the Git report. The correlation target derives bounded fingerprints from it and does not retain Codex patch/source snippets.
+
+`GitHunk.truncated` is a material correlation limitation for any relevant hunk.
+An observed candidate may still receive an individual strong band from evidence
+that was retained, but Whyline must not return `matched` because another
+candidate's direct overlap may exist outside the retained Git evidence. Missing
+overlap in a truncated hunk is not evidence of content divergence.
 
 Avoid `git log --follow` in v0. It handles only a single path, remains heuristic, and is the wrong primitive for a one-line current attribution. Blame plus the selected commit diff is sufficient for the vertical slice.
 
@@ -614,8 +749,10 @@ Use redacted structures, not copied personal transcript content.
 
 Make the scorer a pure function and use table-driven cases. Assert signals, contradictions, band, ordering, and final selection separately. Required cases include:
 
-- exact repository + exact target SHA => one strong match;
+- exact repository + observed session-head SHA without patch => not strong;
+- exact repository + distinctive structured patch overlap => one strong match;
 - same repository + distinctive patch overlap but stale rebased SHA => strong;
+- unknown/deleted cwd + session-head target SHA + distinctive patch overlap => historical strong;
 - nearest timestamp in wrong repository => excluded;
 - same filename and close time only => weak;
 - two strong sessions => ambiguous;
@@ -623,6 +760,7 @@ Make the scorer a pure function and use table-driven cases. Assert signals, cont
 - one plausible only => no asserted match, displayed as possible;
 - transcript unavailable => Git-only success;
 - truncated transcript => limitation attached, not silent confidence;
+- truncated relevant Git hunk => no `matched` and no inferred divergence from absence of overlap;
 - agent patch later changed by a human => plausible or ambiguous, depending on overlap.
 
 ### End-to-end CLI tests

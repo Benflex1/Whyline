@@ -221,3 +221,44 @@ npm test            76 passed, 0 failed
 npm run check       76 passed, 0 failed
 git diff --check    passed
 ```
+
+## Fix round 3/5
+
+### Reviewer finding addressed
+
+`correlate` now scores eligible candidates before deriving the final global
+coverage. Input-supplied limitations are merged once as before. Newly derived
+material candidate limitations—such as chronology-material compaction and
+truncated Git hunk evidence—are then merged into global coverage and promote
+its status to `limited`. Informational candidate limitations remain on their
+candidate only, and input limitations are excluded from the derived merge so
+counts and candidate/global separation are preserved.
+
+Unavailable coverage still returns `unavailable` before scoring, and an
+available empty store remains `complete` with its non-material empty-store
+limitation. Candidate results retain their own limitation lists for the
+selection and alternatives contract.
+
+### Regression and self-review
+
+Added a decision-table regression covering both a later compaction diagnostic
+and a truncated relevant Git hunk. Each case verifies that the result remains
+`none`, the selected candidate retains its material limitation, and returned
+global coverage is also `limited` with the corresponding typed limitation.
+
+The change is confined to pure correlation coverage propagation and its tests;
+no Git facts, Codex discovery behavior, renderer behavior, or Task 6/7 work
+was changed.
+
+### Fix-round 3 verification
+
+```text
+Focused: npm run build && node --test dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-flow.test.js dist/test/git-provenance.test.js
+45 passed, 0 failed
+
+npm run typecheck   passed
+npm run build       passed
+npm test            77 passed, 0 failed
+npm run check       77 passed, 0 failed
+git diff --check    passed
+```

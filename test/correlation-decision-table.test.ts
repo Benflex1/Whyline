@@ -12,6 +12,7 @@ import type {
   CorrelationCandidateInput,
   CorrelationCoverage,
   CorrelationHunk,
+  CorrelationLimitation,
   CorrelationTarget,
   ResolvedCommitReference,
 } from "../src/correlation/model.js";
@@ -433,6 +434,48 @@ test("coverage table keeps safe pre-match compaction informational and later los
   });
   assert.equal(unrecoveredSuccess.band, "weak");
   assert.equal(unrecoveredSuccess.signals.some((signal) => signal.kind === "structured-patch-attempt-target-path"), true);
+});
+
+test("candidate material limitations are reflected in global coverage", () => {
+  const cases: readonly {
+    readonly name: string;
+    readonly target: CorrelationTarget;
+    readonly candidate: CorrelationCandidateInput;
+    readonly limitation: CorrelationLimitation["kind"];
+  }[] = [
+    {
+      name: "later compaction",
+      target: target(),
+      candidate: input({
+        evidence: evidenceBundle([patchEvidence()], {
+          diagnostics: [{ kind: "compacted-history", record: 20 }],
+        }),
+      }),
+      limitation: "material-compaction",
+    },
+    {
+      name: "truncated Git hunk",
+      target: target({ relevantHunks: [hunk({ truncated: true })] }),
+      candidate: input(),
+      limitation: "truncated-git-hunk",
+    },
+  ];
+
+  for (const row of cases) {
+    const result = correlate(row.target, [row.candidate], coverage());
+    assert.equal(result.status, "none", row.name);
+    assert.equal(result.coverage.status, "limited", row.name);
+    assert.equal(
+      result.coverage.limitations.some((limitation) => limitation.kind === row.limitation && limitation.material),
+      true,
+      row.name,
+    );
+    assert.equal(
+      result.alternatives[0]?.coverageLimitations.some((limitation) => limitation.kind === row.limitation && limitation.material),
+      true,
+      row.name,
+    );
+  }
 });
 
 test("operation and coverage table gates direct overlap and final selection", () => {

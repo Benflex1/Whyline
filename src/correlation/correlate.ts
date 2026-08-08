@@ -30,9 +30,9 @@ function mergeLimitations(
     : { kind: left.kind, material: left.material || right.material, count };
 }
 
-function coverageWithCandidateLimitations(
+function coverageWithLimitations(
   coverage: CorrelationCoverage,
-  inputs: readonly CorrelationCandidateInput[],
+  limitationsToMerge: readonly CorrelationLimitation[],
 ): CorrelationCoverage {
   const limitations = new Map<CorrelationLimitation["kind"], CorrelationLimitation>();
   const add = (limitation: CorrelationLimitation): void => {
@@ -44,9 +44,7 @@ function coverageWithCandidateLimitations(
   };
 
   for (const limitation of coverage.limitations) add(limitation);
-  for (const input of inputs) {
-    for (const limitation of input.coverageLimitations) add(limitation);
-  }
+  for (const limitation of limitationsToMerge) add(limitation);
   const mergedLimitations = [...limitations.values()];
   const status = coverage.status === "unavailable"
     ? "unavailable"
@@ -54,6 +52,37 @@ function coverageWithCandidateLimitations(
       ? "limited"
       : coverage.status;
   return { ...coverage, status, limitations: mergedLimitations };
+}
+
+function coverageWithInputLimitations(
+  coverage: CorrelationCoverage,
+  inputs: readonly CorrelationCandidateInput[],
+): CorrelationCoverage {
+  const limitations: CorrelationLimitation[] = [];
+  for (const input of inputs) limitations.push(...input.coverageLimitations);
+  return coverageWithLimitations(coverage, limitations);
+}
+
+interface ScoredCandidate {
+  readonly input: CorrelationCandidateInput;
+  readonly candidate: CorrelationCandidate;
+}
+
+function coverageWithCandidateLimitations(
+  coverage: CorrelationCoverage,
+  scoredCandidates: readonly ScoredCandidate[],
+): CorrelationCoverage {
+  const limitations: CorrelationLimitation[] = [];
+  for (const scored of scoredCandidates) {
+    for (const limitation of scored.candidate.coverageLimitations) {
+      if (!limitation.material
+        || scored.input.coverageLimitations.some((value) => value.kind === limitation.kind)) {
+        continue;
+      }
+      limitations.push(limitation);
+    }
+  }
+  return coverageWithLimitations(coverage, limitations);
 }
 
 function sufficientCoverage(
@@ -75,19 +104,24 @@ export function correlate(
   inputs: readonly CorrelationCandidateInput[],
   coverage: CorrelationCoverage,
 ): CorrelationResult {
-  const effectiveCoverage = coverageWithCandidateLimitations(coverage, inputs);
-  if (effectiveCoverage.status === "unavailable") {
+  const inputCoverage = coverageWithInputLimitations(coverage, inputs);
+  if (inputCoverage.status === "unavailable") {
     return {
       status: "unavailable",
       alternatives: [],
-      coverage: effectiveCoverage,
+      coverage: inputCoverage,
     };
   }
 
-  const candidates = inputs
+  const scoredCandidates = inputs
     .filter((input) => input.eligible && input.repositoryMatch !== "incompatible")
-    .map((input) => scoreCandidate(target, input))
-    .sort(compareCandidates);
+    .map((input): ScoredCandidate => ({
+      input,
+      candidate: scoreCandidate(target, input),
+    }))
+    .sort((left, right) => compareCandidates(left.candidate, right.candidate));
+  const effectiveCoverage = coverageWithCandidateLimitations(inputCoverage, scoredCandidates);
+  const candidates = scoredCandidates.map((scored) => scored.candidate);
   const strong = candidates.filter((candidate) => candidate.band === "strong");
   const alternatives = visibleCandidates(candidates);
 

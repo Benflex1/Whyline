@@ -500,6 +500,17 @@ relevant dropped records add a material coverage limitation. Explicit evidence
 with a compatible cwd can still contribute, while missing or unresolvable paths
 never establish repository identity.
 
+The Codex extractor maintains the best-known structured effective cwd in
+transcript order. It initializes and updates that state only from the supported
+cwd-bearing `session_meta`, `turn_context`, and
+`thread_settings_applied` records, then attaches the state to each emitted
+`patch-result` when available. This preserves a deleted historical cwd for the
+session-head plus structured-patch recovery conjunction, while ensuring a
+later nested-repository cwd excludes subsequent patch evidence. If no
+structured cwd is known, patch paths are quarantined rather than normalized
+against `initialCwd` or treated as repository identity; material ambiguity is
+reported in correlation coverage.
+
 ### Signals and initial weights
 
 Use an explainable additive score only to order candidates within confidence gates. Initial weights should be fixture-calibrated, not presented to users as probabilities:

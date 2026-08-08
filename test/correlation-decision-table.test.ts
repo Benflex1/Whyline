@@ -251,7 +251,7 @@ test("candidate decision table assigns conservative bands and typed signals", ()
     },
     {
       name: "stale session-head plus current patch overlap",
-      candidate: { references: [reference({ resolution: "unresolved", reference: unrelatedCommit })] },
+      candidate: { references: [reference({ resolution: "other", reference: unrelatedCommit })] },
       band: "strong",
       requiredSignals: ["structured-patch-overlap", "historical-commit-reference"],
       contradiction: false,
@@ -369,13 +369,15 @@ test("changed-path overlap is independent from target-path overlap", () => {
   assert.equal(changedFileOnly.band, "plausible");
 });
 
-test("ambiguous commit references do not become historical context", () => {
-  const candidate = scored({
-    evidence: null,
-    references: [reference({ resolution: "ambiguous" })],
-  });
+test("ambiguous and unresolved commit references do not become historical context", () => {
+  for (const resolution of ["ambiguous", "unresolved"] as const) {
+    const candidate = scored({
+      evidence: null,
+      references: [reference({ resolution })],
+    });
 
-  assert.equal(candidate.signals.some((signal) => signal.kind === "historical-commit-reference"), false);
+    assert.equal(candidate.signals.some((signal) => signal.kind === "historical-commit-reference"), false, resolution);
+  }
 });
 
 test("chronology table suppresses superseded divergence and preserves later contradiction", () => {

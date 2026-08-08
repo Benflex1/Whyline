@@ -101,3 +101,80 @@ npm run check
 `git diff --check` was clean during review. The full check used the existing
 local Codex home for committed Git tests; uncommitted and untracked flow cases
 made zero discovery calls as required.
+
+## Fix round 1/5
+
+### Reviewer findings addressed
+
+1. Compaction, rollback, and abort diagnostics are no longer promoted to
+   material coverage during summary staging, where direct evidence record
+   positions are not yet available. The diagnostics remain in the projected
+   session/evidence contracts. Task 4's chronology-aware scorer classifies
+   them after extraction: diagnostics before a relevant direct record are
+   informational, while later or position-unknown compaction/rollback/abort
+   diagnostics remain material. Partial/corrupt and changed-during-read
+   diagnostics remain material immediately.
+
+2. Historical session-head context now requires
+   `ResolvedCommitReference.resolution === "other"`. Target, ambiguous, and
+   unresolved references cannot produce the historical-reference signal. The
+   decision-table regression preserves the positive `other` case and tests
+   both negative resolutions.
+
+3. Every committed-path test in `test/git-provenance.test.ts` now receives a
+   fixture-owned, empty synthetic Codex home through both the Git runner
+   environment and `AnalyzeLocationOptions.codexHome`. CLI subprocess tests
+   inherit the same fixture environment, so automated tests cannot inspect the
+   developer's real Codex profile.
+
+4. The coordinator now projects summaries to session identity, timestamps,
+   safe commit-reference metadata, partial state, and typed diagnostics. It
+   removes initial/working directories and replaces transcript source paths
+   with an opaque non-filesystem marker. Evidence projection removes absolute
+   cwd values and normalizes in-worktree absolute evidence paths to relative
+   paths; outside absolute paths are dropped. Pure `correlate` ordering no
+   longer reads or sorts `sourcePath`. Repository classification and raw
+   source handles remain in the orchestration layer.
+
+5. `test/provenance-correlation-flow.test.ts` now covers available/limited/
+   unavailable discovery, earlier and later diagnostics, current-worktree
+   classification, privacy of projected correlation data, the 32-candidate
+   extraction cap, omitted eligible coverage, an unresolved repository
+   candidate, and the existing uncommitted/untracked early-return and narrow
+   target-hint behavior. Existing mutation-hook and linked-worktree Git tests
+   continue to run with the synthetic Codex home.
+
+### Self-review
+
+- No Git facts were changed; `WhylineReport.correlation` remains optional and
+  separate from provenance.
+- No raw transcript path, cwd, working-directory list, prompt, command,
+  output, patch payload, or renderer/report object enters pure correlation.
+- Reference resolution remains current-repository-only and argv-only; no
+  remote, shell parsing, network, or mutation-capable Git call was added.
+- Uncommitted and untracked locations still return before discovery.
+- Candidate-cap and unresolved-candidate limitations remain material so a
+  potentially strong candidate is never silently treated as disproven.
+- Worktree/common-directory classification stays in the coordinator, with a
+  known different common Git directory excluded and missing paths unable to
+  create a positive signal.
+- Tasks 6 and 7 were not started.
+
+### Fix-round verification
+
+Focused regression run:
+
+```text
+npm run build && node --test dist/test/correlation-decision-table.test.js dist/test/provenance-correlation-flow.test.js dist/test/git-provenance.test.js
+43 passed, 0 failed
+```
+
+Fresh repository verification:
+
+```text
+npm run typecheck   passed
+npm run build       passed
+npm test            75 passed, 0 failed
+npm run check       75 passed, 0 failed
+git diff --check    passed
+```

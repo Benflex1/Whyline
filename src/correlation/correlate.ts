@@ -13,7 +13,7 @@ function compareCandidates(left: CorrelationCandidate, right: CorrelationCandida
   const leftId = left.session.sessionId ?? "";
   const rightId = right.session.sessionId ?? "";
   if (leftId !== rightId) return leftId.localeCompare(rightId);
-  return left.session.ref.sourcePath.localeCompare(right.session.ref.sourcePath);
+  return 0;
 }
 
 function visibleCandidates(candidates: readonly CorrelationCandidate[]): readonly CorrelationCandidate[] {

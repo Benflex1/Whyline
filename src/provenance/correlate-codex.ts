@@ -156,11 +156,10 @@ function diagnosticLimitations(
         break;
       case "compacted-history":
       case "context-compaction":
-        add(limitation("material-compaction", true));
-        break;
       case "thread-rollback":
       case "turn-aborted":
-        add(limitation("material-rollback-or-abort", true));
+        // Preserve the diagnostic; scoreCandidate assigns materiality after
+        // direct evidence record positions are known.
         break;
       case "conflicting-session-metadata":
       case "retention-limit":
@@ -172,6 +171,92 @@ function diagnosticLimitations(
     }
   }
   return result;
+}
+
+const OPAQUE_SESSION_SOURCE = "<opaque-agent-session>";
+
+function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummary {
+  return {
+    ref: {
+      adapterId: summary.ref.adapterId,
+      sourcePath: OPAQUE_SESSION_SOURCE,
+      sourceKind: summary.ref.sourceKind,
+    },
+    sessionId: summary.sessionId,
+    startedAt: summary.startedAt,
+    observedThroughAt: summary.observedThroughAt,
+    workingDirectories: [],
+    transcriptGit: summary.transcriptGit === undefined
+      ? undefined
+      : {
+        commitHash: summary.transcriptGit.commitHash,
+        referenceKind: summary.transcriptGit.referenceKind,
+      },
+    isPartial: summary.isPartial,
+    diagnostics: summary.diagnostics,
+  };
+}
+
+function projectEvidencePath(value: string, worktreeRoot: string): string | null {
+  if (!path.isAbsolute(value)) return value;
+  const relative = path.relative(worktreeRoot, value);
+  if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return relative.split(path.sep).join("/");
+}
+
+function projectEvidence(
+  evidence: AgentEvidenceBundle["evidence"][number],
+  worktreeRoot: string,
+): AgentEvidenceBundle["evidence"][number] {
+  const patch = evidence.patch === undefined
+    ? undefined
+    : {
+      ...evidence.patch,
+      changes: evidence.patch.changes.flatMap((change) => {
+        const normalizedPath = projectEvidencePath(change.path, worktreeRoot);
+        if (normalizedPath === null) return [];
+        const normalizedMovedFrom = change.movedFrom === undefined
+          ? null
+          : projectEvidencePath(change.movedFrom, worktreeRoot);
+        return [{
+          ...change,
+          path: normalizedPath,
+          ...(normalizedMovedFrom === null ? {} : { movedFrom: normalizedMovedFrom }),
+        }];
+      }),
+    };
+  return {
+    id: evidence.id,
+    kind: evidence.kind,
+    occurredAt: evidence.occurredAt,
+    paths: evidence.paths.flatMap((value) => {
+      const normalized = projectEvidencePath(value, worktreeRoot);
+      return normalized === null ? [] : [normalized];
+    }),
+    operation: evidence.operation,
+    callId: evidence.callId,
+    resultRecorded: evidence.resultRecorded,
+    terminalSessionId: evidence.terminalSessionId,
+    reportedSuccess: evidence.reportedSuccess,
+    status: evidence.status,
+    patch,
+    commitReferenceKind: evidence.commitReferenceKind,
+    commitIds: evidence.commitIds,
+    extraction: evidence.extraction,
+    sourceRecord: evidence.sourceRecord,
+  };
+}
+
+function projectEvidenceBundle(
+  bundle: AgentEvidenceBundle,
+  worktreeRoot: string,
+): AgentEvidenceBundle {
+  return {
+    session: projectSessionSummary(bundle.session),
+    evidence: bundle.evidence.map((evidence) => projectEvidence(evidence, worktreeRoot)),
+    unknownRecordCount: bundle.unknownRecordCount,
+    diagnostics: bundle.diagnostics,
+  };
 }
 
 async function existingCanonicalPath(value: string): Promise<string | null> {
@@ -390,7 +475,7 @@ export async function correlateCodex(
       summaryReferences(summary),
     );
     const request: CandidateBuildRequest = {
-      session: summary,
+      session: projectSessionSummary(summary),
       evidence: null,
       repositoryMatch,
       references,
@@ -434,8 +519,10 @@ export async function correlateCodex(
         [...summaryReferences(candidate.summary), ...evidenceReferences(bundle)],
       );
     const fullRequest: CandidateBuildRequest = {
-      session: bundle?.session ?? candidate.summary,
-      evidence: bundle,
+      session: projectSessionSummary(bundle?.session ?? candidate.summary),
+      evidence: bundle === null
+        ? null
+        : projectEvidenceBundle(bundle, options.target.repository.worktreeRoot),
       repositoryMatch: candidate.repositoryMatch,
       references: fullReferences,
       coverageLimitations: [

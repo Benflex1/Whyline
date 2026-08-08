@@ -27,7 +27,9 @@ interface Fixture {
 async function fixture(t: test.TestContext, objectFormat?: "sha1" | "sha256"): Promise<Fixture> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "whyline-git-test-"));
   const globalConfig = path.join(directory, "empty-gitconfig");
+  const codexHome = path.join(directory, "synthetic-codex-home");
   await writeFile(globalConfig, "", "utf8");
+  await mkdir(codexHome, { recursive: true });
   const environment: NodeJS.ProcessEnv = {
     GIT_CONFIG_GLOBAL: globalConfig,
     GIT_CONFIG_SYSTEM: globalConfig,
@@ -35,6 +37,7 @@ async function fixture(t: test.TestContext, objectFormat?: "sha1" | "sha256"): P
     GIT_TERMINAL_PROMPT: "0",
     LC_ALL: "C",
     LANG: "C",
+    CODEX_HOME: codexHome,
   };
   const runner = new GitProcess({ environment });
   const initArgs = ["init", "--initial-branch=main"];
@@ -101,12 +104,14 @@ async function analyze(
   fixtureValue: Fixture,
   relativeLocation: string,
   line = 1,
-  options: { readonly currentDirectory?: string; readonly git?: GitRunner; readonly hooks?: AnalysisHooks } = {},
+  options: { readonly currentDirectory?: string; readonly git?: GitRunner; readonly hooks?: AnalysisHooks; readonly codexHome?: string } = {},
 ): Promise<WhylineReport> {
+  const codexHome = options.codexHome ?? fixtureValue.environment.CODEX_HOME;
   return analyzeLocation(`${relativeLocation}:${line}`, {
     currentDirectory: options.currentDirectory ?? fixtureValue.directory,
     git: options.git ?? fixtureValue.runner,
     ...(options.hooks === undefined ? {} : { hooks: options.hooks }),
+    ...(codexHome === undefined ? {} : { codexHome }),
   });
 }
 

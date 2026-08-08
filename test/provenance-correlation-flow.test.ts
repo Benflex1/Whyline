@@ -6,7 +6,9 @@ import path from "node:path";
 import test from "node:test";
 
 import type {
+  AgentDiagnostic,
   AgentEvidenceBundle,
+  AgentHistoryAvailability,
   AgentHistoryDiscoveryContext,
   AgentHistoryDiscoveryResult,
   AgentHistorySource,
@@ -83,6 +85,7 @@ function summary(
   ref: AgentSessionRef,
   cwd: string,
   commitHash: string,
+  overrides: Partial<AgentSessionSummary> = {},
 ): AgentSessionSummary {
   return {
     ref,
@@ -94,6 +97,7 @@ function summary(
     transcriptGit: { commitHash, referenceKind: "session-head" },
     isPartial: false,
     diagnostics: [],
+    ...overrides,
   };
 }
 
@@ -101,6 +105,7 @@ function evidence(
   session: AgentSessionSummary,
   lines: readonly string[],
   targetPath = "src-target.ts",
+  diagnostics: readonly AgentDiagnostic[] = [],
 ): AgentEvidenceBundle {
   const fingerprints = lines.map(digestLine);
   return {
@@ -138,8 +143,22 @@ function evidence(
       sourceRecord: 10,
     }],
     unknownRecordCount: 0,
+    diagnostics,
+  };
+}
+
+function emptyEvidenceBundle(session: AgentSessionSummary): AgentEvidenceBundle {
+  return {
+    session,
+    evidence: [],
+    unknownRecordCount: 0,
     diagnostics: [],
   };
+}
+
+interface FakeAgentHistoryOptions {
+  readonly availability?: AgentHistoryAvailability;
+  readonly diagnostics?: readonly AgentDiagnostic[];
 }
 
 class FakeAgentHistorySource implements AgentHistorySource {
@@ -149,11 +168,19 @@ class FakeAgentHistorySource implements AgentHistorySource {
   public summaryCalls = 0;
   public extractionCalls = 0;
   public extractionTargets: (AgentEvidenceTarget | undefined)[] = [];
+  private readonly summaries: readonly AgentSessionSummary[];
+  private readonly bundles: ReadonlyMap<string, AgentEvidenceBundle>;
 
   public constructor(
-    private readonly sessionSummary: AgentSessionSummary,
-    private readonly bundle: AgentEvidenceBundle,
-  ) {}
+    sessionSummary: AgentSessionSummary | readonly AgentSessionSummary[],
+    bundle: AgentEvidenceBundle | readonly AgentEvidenceBundle[],
+    private readonly options: FakeAgentHistoryOptions = {},
+  ) {
+    this.summaries = Array.isArray(sessionSummary) ? sessionSummary : [sessionSummary];
+    const bundles = Array.isArray(bundle) ? bundle : this.summaries.map(() => bundle);
+    assert.equal(bundles.length, this.summaries.length);
+    this.bundles = new Map(this.summaries.map((value, index) => [value.ref.sourcePath, bundles[index]!]));
+  }
 
   public async *discover(): AsyncIterable<AgentSessionRef> {
     this.discoverCalls += 1;
@@ -165,16 +192,17 @@ class FakeAgentHistorySource implements AgentHistorySource {
   ): Promise<AgentHistoryDiscoveryResult> {
     this.discoveryContexts.push(context ?? {});
     return {
-      availability: "available",
-      refs: [this.sessionSummary.ref],
-      diagnostics: [],
+      availability: this.options.availability ?? "available",
+      refs: this.summaries.map((value) => value.ref),
+      diagnostics: this.options.diagnostics ?? [],
     };
   }
 
   public async readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary> {
     this.summaryCalls += 1;
-    assert.equal(ref.sourcePath, this.sessionSummary.ref.sourcePath);
-    return this.sessionSummary;
+    const value = this.summaries.find((summaryValue) => summaryValue.ref.sourcePath === ref.sourcePath);
+    assert.ok(value !== undefined);
+    return value;
   }
 
   public async extractEvidence(
@@ -183,8 +211,9 @@ class FakeAgentHistorySource implements AgentHistorySource {
   ): Promise<AgentEvidenceBundle> {
     this.extractionCalls += 1;
     this.extractionTargets.push(target);
-    assert.equal(ref.sourcePath, this.sessionSummary.ref.sourcePath);
-    return this.bundle;
+    const value = this.bundles.get(ref.sourcePath);
+    assert.ok(value !== undefined);
+    return value;
   }
 }
 
@@ -260,6 +289,7 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   assert.equal(report.provenance.commit?.id, commit);
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.session.sessionId, "synthetic-session");
+  assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
   assert.equal(source.summaryCalls, 1);
   assert.equal(source.extractionCalls, 1);
   assert.deepEqual(source.discoveryContexts, [{ historyRoot: syntheticHome }]);
@@ -273,4 +303,150 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   assert.equal("commit" in targetHint, false);
   assert.equal("relevantHunks" in targetHint, false);
   assert.equal("evidence" in targetHint, false);
+  const serializedCorrelation = JSON.stringify(report.correlation);
+  assert.equal(serializedCorrelation.includes(f.directory), false);
+  assert.equal(serializedCorrelation.includes("synthetic-home"), false);
+});
+
+test("committed correlation preserves availability states", async (t) => {
+  const cases: readonly {
+    readonly availability: AgentHistoryAvailability;
+    readonly status: "none" | "unavailable";
+    readonly coverageStatus: "complete" | "limited" | "unavailable";
+    readonly limitation: string;
+  }[] = [
+    { availability: "available", status: "none", coverageStatus: "complete", limitation: "empty-readable-store" },
+    { availability: "limited", status: "none", coverageStatus: "limited", limitation: "discovery-limited" },
+    { availability: "unavailable", status: "unavailable", coverageStatus: "unavailable", limitation: "discovery-unavailable" },
+  ];
+
+  for (const row of cases) {
+    const f = await fixture(t);
+    await writeFile(path.join(f.directory, "src-target.ts"), "available state\n", "utf8");
+    await commitTarget(f);
+    const source = new FakeAgentHistorySource([], [], { availability: row.availability });
+    const report = await analyzeLocation("src-target.ts:1", {
+      currentDirectory: f.directory,
+      git: f.runner,
+      agentHistorySource: source,
+      codexHome: path.join(f.directory, "synthetic-home"),
+    });
+
+    assert.equal(report.correlation?.status, row.status, row.availability);
+    assert.equal(report.correlation?.coverage.status, row.coverageStatus, row.availability);
+    assert.equal(
+      report.correlation?.coverage.limitations.some((value) => value.kind === row.limitation),
+      true,
+      row.availability,
+    );
+  }
+});
+
+test("earlier compaction, rollback, and abort diagnostics do not block direct matches", async (t) => {
+  const diagnosticKinds: readonly AgentDiagnostic["kind"][] = [
+    "compacted-history",
+    "context-compaction",
+    "thread-rollback",
+    "turn-aborted",
+  ];
+
+  for (const diagnosticKind of diagnosticKinds) {
+    const f = await fixture(t);
+    const firstLine = `diagnostic-${diagnosticKind}-one`;
+    const secondLine = `diagnostic-${diagnosticKind}-two`;
+    await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+    const commit = await commitTarget(f);
+    const ref = reference(f, diagnosticKind);
+    const session = summary(ref, f.directory, commit, { sessionId: diagnosticKind });
+    const source = new FakeAgentHistorySource(
+      session,
+      evidence(session, [firstLine, secondLine], "src-target.ts", [{ kind: diagnosticKind, record: 5 }]),
+    );
+    const report = await analyzeLocation("src-target.ts:2", {
+      currentDirectory: f.directory,
+      git: f.runner,
+      agentHistorySource: source,
+      codexHome: path.join(f.directory, "synthetic-home"),
+    });
+
+    assert.equal(report.correlation?.status, "matched", diagnosticKind);
+    assert.equal(
+      report.correlation?.coverage.limitations.some((value) => value.material),
+      false,
+      diagnosticKind,
+    );
+  }
+
+  const f = await fixture(t);
+  const firstLine = "material diagnostic one";
+  const secondLine = "material diagnostic two";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const ref = reference(f, "later-compaction");
+  const session = summary(ref, f.directory, commit, { sessionId: "later-compaction" });
+  const source = new FakeAgentHistorySource(
+    session,
+    evidence(session, [firstLine, secondLine], "src-target.ts", [{ kind: "compacted-history", record: 20 }]),
+  );
+  const report = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: source,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(report.correlation?.status, "none");
+  const diagnosticCandidate = report.correlation?.alternatives[0];
+  assert.ok(diagnosticCandidate !== undefined);
+  assert.equal(diagnosticCandidate.coverageLimitations.some((value) => value.kind === "material-compaction" && value.material), true);
+});
+
+test("candidate cap and unresolved repository candidates remain visible in coverage", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "cap one";
+  const secondLine = "cap two";
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const commit = await commitTarget(f);
+  const summaries = Array.from({ length: 33 }, (_, index) => {
+    const id = `cap-${index.toString().padStart(2, "0")}`;
+    return summary(reference(f, id), f.directory, commit, { sessionId: id });
+  });
+  const bundles = summaries.map((value, index) => index === 0
+    ? evidence(value, [firstLine, secondLine])
+    : emptyEvidenceBundle(value));
+  const cappedSource = new FakeAgentHistorySource(summaries, bundles);
+  const cappedReport = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: cappedSource,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(cappedSource.extractionCalls, 32);
+  assert.equal(cappedReport.correlation?.status, "none");
+  assert.equal(cappedReport.correlation?.coverage.omittedEligibleRefs, 1);
+  assert.equal(cappedReport.correlation?.coverage.limitations.some((value) => value.kind === "candidate-cap" && value.material), true);
+
+  const matchingRef = reference(f, "matching");
+  const matching = summary(matchingRef, f.directory, commit, { sessionId: "matching" });
+  const unknownRef = reference(f, "unknown");
+  const unknown = summary(unknownRef, path.join(f.directory, "deleted-cwd"), "not-a-commit", {
+    sessionId: "unknown",
+    initialCwd: path.join(f.directory, "deleted-cwd"),
+    workingDirectories: [],
+  });
+  const unresolvedSource = new FakeAgentHistorySource(
+    [matching, unknown],
+    [evidence(matching, [firstLine, secondLine]), evidence(unknown, [firstLine, secondLine])],
+  );
+  const unresolvedReport = await analyzeLocation("src-target.ts:2", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: unresolvedSource,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+
+  assert.equal(unresolvedSource.extractionCalls, 1);
+  assert.equal(unresolvedReport.correlation?.status, "none");
+  assert.equal(unresolvedReport.correlation?.coverage.limitations.some((value) => value.kind === "unresolved-repository-candidate" && value.material), true);
 });

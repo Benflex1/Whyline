@@ -118,8 +118,7 @@ function hasTargetReference(
 function hasHistoricalReference(input: CorrelationCandidateInput): boolean {
   return input.references.some((reference) =>
     reference.kind === "session-head"
-      && reference.resolution !== "target"
-      && reference.resolution !== "ambiguous");
+      && reference.resolution === "other");
 }
 
 function temporalDistanceMs(

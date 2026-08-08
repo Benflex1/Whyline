@@ -115,9 +115,35 @@ test("discovery is recursive, metadata-only, filename-independent, and archive-o
   assert.deepEqual(historyBundle.evidence, []);
   assert.ok(historyBundle.diagnostics.some((item) => item.kind === "unsupported-source"));
 
-  const sourceWithoutArchive = await discoverCodexSources({ codexHome: path.join(home, "missing-archive-home") });
-  assert.deepEqual(sourceWithoutArchive.refs, []);
-  assert.equal(sourceWithoutArchive.availability, "unavailable");
+  const archiveOptionalHome = await temporaryDirectory(t);
+  const archiveOptionalSessions = path.join(archiveOptionalHome, "sessions", "2026", "08", "08");
+  await mkdir(archiveOptionalSessions, { recursive: true });
+  await copyFile(
+    fixturePath("rollout-cli-v0.142.5.jsonl"),
+    path.join(archiveOptionalSessions, "active-only.jsonl"),
+  );
+  const sourceWithoutArchive = await discoverCodexSources({ codexHome: archiveOptionalHome });
+  assert.equal(sourceWithoutArchive.availability, "available");
+  assert.equal(sourceWithoutArchive.refs.length, 1);
+  assert.deepEqual(sourceWithoutArchive.diagnostics, []);
+
+  const missingHome = await discoverCodexSources({ codexHome: path.join(home, "missing-home") });
+  assert.deepEqual(missingHome.refs, []);
+  assert.equal(missingHome.availability, "unavailable");
+
+  const partiallyUnreadableHome = await temporaryDirectory(t);
+  await writeFile(path.join(partiallyUnreadableHome, "sessions"), "not a directory\n", "utf8");
+  const readableArchivedSessions = path.join(partiallyUnreadableHome, "archived_sessions", "2026", "08", "08");
+  await mkdir(readableArchivedSessions, { recursive: true });
+  await copyFile(
+    fixturePath("rollout-subagent-v0.147.0.jsonl"),
+    path.join(readableArchivedSessions, "readable-archive.jsonl"),
+  );
+  const partiallyUnreadable = await discoverCodexSources({ codexHome: partiallyUnreadableHome });
+  assert.equal(partiallyUnreadable.availability, "limited");
+  assert.equal(partiallyUnreadable.refs.length, 1);
+  assert.equal(partiallyUnreadable.refs[0]?.sourceKind, "archived");
+  assert.ok(partiallyUnreadable.diagnostics.some((item) => item.kind === "unreadable-transcript"));
 
   const emptyHome = await temporaryDirectory(t);
   const emptyReadable = await discoverCodexSources({ codexHome: emptyHome });
@@ -239,6 +265,7 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.equal(results[0]?.patch?.changes[0]?.payloadFingerprint.length, 64);
   assert.equal(revisions[0]?.commitIds[0], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
   assert.equal(revisions[0]?.commitReferenceKind, "session-head");
+  assert.equal(revisions.some((item) => item.commitReferenceKind === "produced-commit"), false);
   assert.ok(bundle.diagnostics.some((item) => item.kind === "compacted-history"));
   assert.ok(bundle.diagnostics.some((item) => item.kind === "context-compaction"));
   assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);
@@ -448,6 +475,10 @@ test("agent source exposes only the staged discovery, summary, and evidence oper
     refs.push(ref);
   }
   assert.equal(refs.length, 1);
+  const diagnosticDiscovery = await source.discoverWithDiagnostics({ historyRoot: home });
+  assert.equal(diagnosticDiscovery.availability, "available");
+  assert.equal(diagnosticDiscovery.refs.length, 1);
+  assert.deepEqual(diagnosticDiscovery.diagnostics, []);
   assert.equal((await source.readSummary(refs[0]!)).sessionId, "example-session");
   assert.equal((await source.extractEvidence(refs[0]!)).session.sessionId, "example-session");
 });

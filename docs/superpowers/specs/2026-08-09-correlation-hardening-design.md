@@ -676,9 +676,8 @@ for every retained run. Original rollout files:
 - remain outside the Whyline repository in a permission-restricted local
   directory;
 - remain local/private and outside sync/backup where feasible;
-- use a fresh dedicated `CODEX_HOME` and a disposable validation repository;
-- are produced with no remotes, network access, personal-home access, secret
-  mounts, or personal credentials;
+- use a fresh dedicated `CODEX_HOME` for isolated validation rollout and
+  configuration state, plus a disposable validation repository;
 - contain only deliberately invented validation content;
 - are never committed, uploaded, pasted into reports, or copied into fixtures;
   and
@@ -695,6 +694,46 @@ fixture version, consent state, and expiry/deletion state. It must not contain
 session IDs, transcript filenames/paths, prompts, commands, patch text,
 repository paths/URLs, or source-session identifiers. No private registry key
 is copied into repository fixtures or reports.
+
+### Codex corpus-generation boundary
+
+During P1/P2 rollout generation, the actual supported Codex client may use only
+the minimum model-service transport and authentication it requires to produce
+the real rollout. This exception belongs exclusively to the Codex
+client/model-service boundary. It does not authorize network access by Whyline,
+Git correlation, validation tooling, transcript commands, or arbitrary
+agent-executed commands/tools. This design does not prescribe a Codex
+authentication mechanism because the empirical preflight did not establish one
+as a source contract.
+
+During generation, the validation repository and agent tool environment must:
+
+- have no Git remotes;
+- contain only deliberately invented, non-sensitive content;
+- have no personal project, workspace, or personal-home mounts;
+- expose no unrelated secrets or credentials to agent-executed tools;
+- forbid arbitrary network commands and tools for the scenario; and
+- never intentionally place authentication material in prompts, commands,
+  source files, tool output, reports, fixtures, rollout-derived artifacts, or
+  the private corpus registry.
+
+The dedicated `CODEX_HOME` isolates validation rollout and configuration state;
+it does not make Codex client authentication part of Whyline's corpus data
+model. Any authentication mechanism required by the client remains outside that
+model. Whyline and the corpus procedure must never inspect it, copy it into
+repository artifacts, or retain it as transcript-derived validation data.
+
+### Whyline analysis and automated-test boundary
+
+After each scenario's Codex sessions are quiescent, run Whyline from a
+non-Codex shell. Correlation and validation are strictly local/offline: they use
+no network access, execute no transcript commands, and consume no authentication
+material. The original rollouts remain private and retain the same
+acceptance-or-seven-day expiry.
+
+Automated implementation, unit, and end-to-end tests use only sanitized
+synthetic fixtures. They never automatically read personal or controlled real
+Codex history and never use network access.
 
 ### P1 — controlled real positive
 
@@ -866,9 +905,16 @@ All must pass:
 9. The Codex correlation path reads each stable transcript at most once.
 10. Telemetry contains only the fixed numeric keys; normal CLI output contains
     no metrics or new transcript-derived material.
-11. No implementation or test reads real personal Codex history automatically,
-    writes transcript-derived persistent state, executes transcript commands,
-    uses network access, or weakens Git's read-only argv boundary.
+11. Whyline production correlation, all transcript-derived processing, and all
+    automated implementation/unit/end-to-end tests use no network access,
+    execute no transcript commands, consume no authentication material, and do
+    not automatically read personal or controlled real Codex history. They do
+    not write transcript-derived persistent state or weaken Git's read-only argv
+    boundary. The sole network/authentication exception is the minimum
+    Codex-client/model-service transport required earlier to generate the
+    consented actual P1/P2 rollout; it grants no network permission to Whyline,
+    Git correlation, transcript commands, automated tests, or validation
+    tooling.
 
 ### Controlled validation gates
 

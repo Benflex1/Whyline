@@ -223,7 +223,7 @@ export async function resolveRangeLocation(
 }
 
 export async function currentLocationSnapshot(
-  location: CodeLocation,
+  location: Pick<CodeLocation, "absolutePath">,
 ): Promise<FileSnapshot> {
   const current = await readSnapshot(location.absolutePath);
   return current.snapshot;

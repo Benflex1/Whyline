@@ -201,7 +201,7 @@
 - `parseArguments(argv): { readonly details: boolean; readonly location: string }` accepts one location or `--details` followed by one location and throws the existing usage/input error for unknown, repeated, misplaced, or missing arguments.
 - `renderSummary(report): string` emits concise outcome-first output.
 - `renderDetails(report): string` retains the existing forensic report and adds ancestry evidence.
-- `renderText(report, options?: { readonly details?: boolean }): string` dispatches to summary by default and details when requested; `renderCorrelation` remains available for details while a bounded summary helper provides default AI provenance wording.
+- `renderText(report): string` remains the bounded forensic/details renderer for existing callers; `main.ts` dispatches to `renderSummary` by default and `renderText` for `--details`, while `renderCorrelation` remains available for details and a bounded summary helper provides default AI provenance wording.
 
 - [ ] **Step 1: Add failing parser and renderer tests.**
 

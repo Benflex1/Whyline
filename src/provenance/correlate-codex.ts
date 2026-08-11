@@ -1,4 +1,5 @@
 import { realpath, stat } from "node:fs/promises";
+import { performance } from "node:perf_hooks";
 import path from "node:path";
 
 import type {
@@ -8,13 +9,15 @@ import type {
   AgentHistoryDiscoveryContext,
   AgentHistoryDiscoveryResult,
   AgentHistorySource,
+  AgentSummaryRelevanceScan,
   AgentSessionRef,
   AgentSessionSummary,
   AgentEvidenceTarget,
 } from "../agents/agent-history-source.js";
-import { codexHistorySource } from "../agents/codex/source.js";
+import { CodexHistorySource } from "../agents/codex/source.js";
 import {
   buildCandidateInput,
+  classifyStrongPossibility,
   type CandidateBuildRequest,
 } from "../correlation/build-candidates.js";
 import { correlate } from "../correlation/correlate.js";
@@ -24,9 +27,21 @@ import type {
   CorrelationRepositoryMatch,
   CorrelationResult,
   CorrelationTarget,
+  CandidateStrongPossibility,
   ResolvedCommitReference,
 } from "../correlation/model.js";
-import type { GitRunner } from "../git/git-process.js";
+import type { GitResult, GitRunner } from "../git/git-process.js";
+import {
+  BoundedWorkPool,
+  GitWorkGate,
+  defaultCorrelationWorkLimits,
+  type BoundedWorkStats,
+  type CorrelationWorkLimits,
+} from "./bounded-work-pool.js";
+import {
+  CorrelationTelemetry,
+  type CorrelationMetricName,
+} from "./correlation-telemetry.js";
 import { isWithinDirectory } from "../git/repository-context.js";
 import type {
   RepositoryContext,
@@ -43,11 +58,14 @@ interface RawReference {
 
 interface SummaryCandidate {
   readonly ref: AgentSessionRef;
+  readonly scan: AgentSummaryRelevanceScan;
   readonly summary: AgentSessionSummary;
   readonly repositoryMatch: CorrelationRepositoryMatch;
   readonly pathMapping: HistoricalPathMapping | null;
+  readonly cwdlessResolution: HistoricalDirectoryResolution | null;
   readonly references: readonly ResolvedCommitReference[];
   readonly input: CorrelationCandidateInput;
+  readonly possibility: CandidateStrongPossibility;
 }
 
 export interface CorrelateCodexOptions {
@@ -57,6 +75,39 @@ export interface CorrelateCodexOptions {
   readonly git: GitRunner;
   readonly agentHistorySource?: AgentHistorySource;
   readonly codexHome?: string;
+  readonly workLimits?: Partial<CorrelationWorkLimits>;
+  readonly telemetry?: CorrelationTelemetry;
+}
+
+export class InvocationGitRunner implements GitRunner {
+  private readonly cache = new Map<string, Promise<GitResult>>();
+  public calls = 0;
+
+  public constructor(
+    private readonly delegate: GitRunner,
+    private readonly gate: GitWorkGate,
+  ) {}
+
+  public run(
+    args: readonly string[],
+    options: { readonly cwd: string; readonly input?: Uint8Array },
+  ): Promise<GitResult> {
+    if (options.input !== undefined) {
+      this.calls += 1;
+      return this.gate.run(() => this.delegate.run(args, options));
+    }
+    const key = `${options.cwd}\0${args.join("\0")}`;
+    const cached = this.cache.get(key);
+    if (cached !== undefined) return cached;
+    this.calls += 1;
+    const result = this.gate.run(() => this.delegate.run(args, options));
+    this.cache.set(key, result);
+    return result;
+  }
+
+  public get maxObservedWorkers(): number {
+    return this.gate.maxObservedWorkers;
+  }
 }
 
 function limitation(
@@ -65,6 +116,83 @@ function limitation(
   count?: number,
 ): CorrelationLimitation {
   return count === undefined ? { kind, material } : { kind, material, count };
+}
+
+function telemetryMetric(suffix: string): CorrelationMetricName {
+  return `whyline.correlation.${suffix}` as CorrelationMetricName;
+}
+
+interface CorrelationTelemetryStages {
+  readonly discoveredRefs: number;
+  readonly bytesScanned: number;
+  readonly scan: BoundedWorkStats;
+  readonly git: BoundedWorkStats & { readonly processMsSum: number };
+  readonly gitCalls: number;
+  readonly projection: BoundedWorkStats;
+  readonly projectedCandidates: number;
+  readonly totalMs: number;
+}
+
+function recordCorrelationTelemetry(
+  telemetry: CorrelationTelemetry | undefined,
+  result: CorrelationResult,
+  candidates: readonly SummaryCandidate[],
+  stages: CorrelationTelemetryStages,
+): void {
+  if (telemetry === undefined) return;
+  telemetry.set(telemetryMetric("discovered_refs"), stages.discoveredRefs);
+  telemetry.set(telemetryMetric("bytes_scanned"), stages.bytesScanned);
+  telemetry.set(telemetryMetric("summary_relevance.wall_ms"), stages.scan.wallMs);
+  telemetry.set(telemetryMetric("summary_relevance.queue_ms_sum"), stages.scan.queueMsSum);
+  telemetry.set(telemetryMetric("summary_relevance.queue_ms_max"), stages.scan.queueMsMax);
+  telemetry.set(telemetryMetric("summary_relevance.work_ms_sum"), stages.scan.workMsSum);
+
+  for (const candidate of candidates) {
+    const category = candidate.repositoryMatch.replaceAll("-", "_");
+    telemetry.add(telemetryMetric(`candidates.${category}`), 1);
+    if (candidate.input.coverageLimitations.some((value) => value.kind === "unsupported-summary")) {
+      telemetry.add(telemetryMetric("candidates.unsupported_summary"), 1);
+    }
+  }
+  telemetry.set(telemetryMetric("proven_not_strong"), result.coverage.provenNotStrongRefs);
+  telemetry.set(telemetryMetric("potentially_strong"), result.coverage.potentiallyStrongRefs);
+
+  telemetry.set(telemetryMetric("git_classification.calls"), stages.gitCalls);
+  telemetry.set(telemetryMetric("git_classification.wall_ms"), stages.git.wallMs);
+  telemetry.set(telemetryMetric("git_classification.queue_ms_sum"), stages.git.queueMsSum);
+  telemetry.set(telemetryMetric("git_classification.queue_ms_max"), stages.git.queueMsMax);
+  telemetry.set(telemetryMetric("git_classification.process_ms_sum"), stages.git.processMsSum);
+
+  telemetry.set(telemetryMetric("full_evidence.candidates"), stages.projectedCandidates);
+  telemetry.set(telemetryMetric("full_evidence.bytes_read"), 0);
+  telemetry.set(telemetryMetric("full_evidence.read_ms_sum"), 0);
+  telemetry.set(telemetryMetric("full_evidence.wall_ms"), stages.projection.wallMs);
+  telemetry.set(telemetryMetric("full_evidence.queue_ms_sum"), stages.projection.queueMsSum);
+  telemetry.set(telemetryMetric("full_evidence.queue_ms_max"), stages.projection.queueMsMax);
+  telemetry.set(telemetryMetric("full_evidence.work_ms_sum"), stages.projection.workMsSum);
+  telemetry.set(telemetryMetric("total_ms"), stages.totalMs);
+
+  for (const value of result.coverage.limitations) {
+    if (value.material) {
+      telemetry.add(telemetryMetric(`material_coverage.${value.kind}`), value.count ?? 1);
+    }
+  }
+}
+
+function recordEmptyCorrelationTelemetry(
+  telemetry: CorrelationTelemetry | undefined,
+  discoveredRefs: number,
+  totalMs: number,
+  result?: CorrelationResult,
+): void {
+  if (telemetry === undefined) return;
+  telemetry.set(telemetryMetric("discovered_refs"), discoveredRefs);
+  telemetry.set(telemetryMetric("total_ms"), totalMs);
+  for (const value of result?.coverage.limitations ?? []) {
+    if (value.material) {
+      telemetry.add(telemetryMetric(`material_coverage.${value.kind}`), value.count ?? 1);
+    }
+  }
 }
 
 function uniqueRawReferences(references: readonly RawReference[]): readonly RawReference[] {
@@ -88,25 +216,6 @@ function summaryReferences(summary: AgentSessionSummary): readonly RawReference[
   }];
 }
 
-function evidenceReferences(bundle: AgentEvidenceBundle): readonly RawReference[] {
-  const references: RawReference[] = [];
-  for (const evidence of bundle.evidence) {
-    if (evidence.commitReferenceKind === undefined) continue;
-    for (const commitId of evidence.commitIds) {
-      references.push({ kind: evidence.commitReferenceKind, reference: commitId });
-    }
-  }
-  return references;
-}
-
-function evidenceMayAffectCorrelation(
-  evidence: AgentEvidenceBundle["evidence"][number],
-): boolean {
-  if (evidence.commitIds.length > 0) return true;
-  if (evidence.kind === "patch-result") return evidence.patch !== undefined || evidence.paths.length > 0;
-  if (evidence.kind !== "patch-attempt") return false;
-  return evidence.paths.length > 0 || (evidence.patch?.changes.length ?? 0) > 0;
-}
 
 async function resolveReferences(
   runner: GitRunner,
@@ -208,6 +317,17 @@ interface ProjectedEvidencePath {
   readonly incompatible: boolean;
 }
 
+interface ProjectedEvidenceResult {
+  readonly evidence: AgentEvidenceBundle["evidence"][number] | null;
+  readonly droppedAsIncompatible: boolean;
+  readonly droppedChangeCount: number;
+}
+
+interface ProjectedEvidenceBundleResult {
+  readonly bundle: AgentEvidenceBundle;
+  readonly droppedIncompatibleChanges: number;
+}
+
 function projectSessionSummary(summary: AgentSessionSummary): AgentSessionSummary {
   return {
     ref: {
@@ -270,18 +390,6 @@ function hasResolvedTargetAnchor(
   return references.some((reference) =>
     reference.resolution === "target"
       && (reference.kind === "session-head" || reference.kind === "produced-commit"));
-}
-
-function hasNormalizedPatchPaths(
-  evidence: AgentEvidenceBundle["evidence"][number],
-): boolean {
-  if (evidence.commitIds.length > 0) return true;
-  if (evidence.kind !== "patch-result" || evidence.patch === undefined) return false;
-  return evidence.patch.changes.length > 0
-    && evidence.patch.changes.every((change) =>
-      [change.path, change.movedFrom].every((value) =>
-        value === undefined
-          || (value.length > 0 && value !== "<outside-session-root>" && !path.isAbsolute(value))));
 }
 
 function evidenceDirectory(
@@ -377,7 +485,7 @@ async function projectEvidence(
   runner: GitRunner,
   cwdlessResolution: HistoricalDirectoryResolution | null,
   historicalAnchorPaths: ReadonlySet<string> | null,
-): Promise<AgentEvidenceBundle["evidence"][number] | null> {
+): Promise<ProjectedEvidenceResult> {
   const evidenceDirectoryValue = evidence.cwd === undefined
     ? null
     : evidenceDirectory(evidence.cwd, session.initialCwd);
@@ -386,8 +494,16 @@ async function projectEvidence(
     : evidenceDirectoryValue === null
       ? { repositoryMatch: "unknown" as const, pathMapping: null }
       : await resolveHistoricalDirectory(runner, repository, evidenceDirectoryValue);
-  if (evidenceResolution === null) return null;
-  if (evidenceResolution.repositoryMatch === "incompatible") return null;
+  if (evidenceResolution === null) {
+    return { evidence: null, droppedAsIncompatible: false, droppedChangeCount: 0 };
+  }
+  if (evidenceResolution.repositoryMatch === "incompatible") {
+    return {
+      evidence: null,
+      droppedAsIncompatible: true,
+      droppedChangeCount: evidence.patch?.changes.length ?? 0,
+    };
+  }
 
   let incompatible = false;
   const projectPath = async (value: string): Promise<string | null> => {
@@ -441,23 +557,33 @@ async function projectEvidence(
     patch = { ...patch, changes: projectedChanges };
   }
 
-  if (incompatible) return null;
+  if (incompatible) {
+    return {
+      evidence: null,
+      droppedAsIncompatible: true,
+      droppedChangeCount: evidence.patch?.changes.length ?? 0,
+    };
+  }
   return {
-    id: evidence.id,
-    kind: evidence.kind,
-    occurredAt: evidence.occurredAt,
-    paths,
-    operation: evidence.operation,
-    callId: evidence.callId,
-    resultRecorded: evidence.resultRecorded,
-    terminalSessionId: evidence.terminalSessionId,
-    reportedSuccess: evidence.reportedSuccess,
-    status: evidence.status,
-    patch,
-    commitReferenceKind: evidence.commitReferenceKind,
-    commitIds: evidence.commitIds,
-    extraction: evidence.extraction,
-    sourceRecord: evidence.sourceRecord,
+    evidence: {
+      id: evidence.id,
+      kind: evidence.kind,
+      occurredAt: evidence.occurredAt,
+      paths,
+      operation: evidence.operation,
+      callId: evidence.callId,
+      resultRecorded: evidence.resultRecorded,
+      terminalSessionId: evidence.terminalSessionId,
+      reportedSuccess: evidence.reportedSuccess,
+      status: evidence.status,
+      patch,
+      commitReferenceKind: evidence.commitReferenceKind,
+      commitIds: evidence.commitIds,
+      extraction: evidence.extraction,
+      sourceRecord: evidence.sourceRecord,
+    },
+    droppedAsIncompatible: false,
+    droppedChangeCount: 0,
   };
 }
 
@@ -467,20 +593,26 @@ async function projectEvidenceBundle(
   runner: GitRunner,
   cwdlessResolution: HistoricalDirectoryResolution | null,
   historicalAnchorPaths: ReadonlySet<string> | null,
-): Promise<AgentEvidenceBundle> {
-  const evidence = (await Promise.all(bundle.evidence.map((value) => projectEvidence(
+): Promise<ProjectedEvidenceBundleResult> {
+  const projected = await Promise.all(bundle.evidence.map((value) => projectEvidence(
     value,
     bundle.session,
     repository,
     runner,
     cwdlessResolution,
     historicalAnchorPaths,
-  )))).filter((value): value is NonNullable<typeof value> => value !== null);
+  )));
   return {
-    session: projectSessionSummary(bundle.session),
-    evidence,
-    unknownRecordCount: bundle.unknownRecordCount,
-    diagnostics: bundle.diagnostics,
+    bundle: {
+      session: projectSessionSummary(bundle.session),
+      evidence: projected
+        .map((value) => value.evidence)
+        .filter((value): value is NonNullable<typeof value> => value !== null),
+      unknownRecordCount: bundle.unknownRecordCount,
+      diagnostics: bundle.diagnostics,
+    },
+    droppedIncompatibleChanges: projected.reduce((count, value) =>
+      count + (value.droppedAsIncompatible ? value.droppedChangeCount : 0), 0),
   };
 }
 
@@ -567,16 +699,8 @@ async function resolveHistoricalDirectory(
 ): Promise<HistoricalDirectoryResolution> {
   const canonical = await existingCanonicalPath(directory);
   if (canonical !== null) {
-    const commonGitDir = await historicalCommonGitDir(runner, directory);
-    if (commonGitDir === null) {
-      return { repositoryMatch: "unknown", pathMapping: null };
-    }
-    if (path.resolve(commonGitDir) !== path.resolve(repository.commonGitDir)) {
-      return { repositoryMatch: "incompatible", pathMapping: null };
-    }
-
     const currentRoot = path.resolve(repository.worktreeRoot);
-    if (isWithinDirectory(currentRoot, canonical)) {
+    if (canonical === currentRoot) {
       return {
         repositoryMatch: "current-worktree",
         pathMapping: { repositoryRoot: currentRoot, historicalCwd: canonical },
@@ -585,12 +709,40 @@ async function resolveHistoricalDirectory(
 
     const linked = repository.worktrees.find((worktree) =>
       path.resolve(worktree.path) !== currentRoot
-        && isWithinDirectory(path.resolve(worktree.path), canonical));
+        && path.resolve(worktree.path) === canonical);
     if (linked !== undefined) {
       return {
         repositoryMatch: "linked-worktree",
         pathMapping: {
           repositoryRoot: path.resolve(linked.path),
+          historicalCwd: canonical,
+        },
+      };
+    }
+
+    const commonGitDir = await historicalCommonGitDir(runner, directory);
+    if (commonGitDir === null) {
+      return { repositoryMatch: "unknown", pathMapping: null };
+    }
+    if (path.resolve(commonGitDir) !== path.resolve(repository.commonGitDir)) {
+      return { repositoryMatch: "incompatible", pathMapping: null };
+    }
+
+    if (isWithinDirectory(currentRoot, canonical)) {
+      return {
+        repositoryMatch: "current-worktree",
+        pathMapping: { repositoryRoot: currentRoot, historicalCwd: canonical },
+      };
+    }
+
+    const linkedInside = repository.worktrees.find((worktree) =>
+      path.resolve(worktree.path) !== currentRoot
+        && isWithinDirectory(path.resolve(worktree.path), canonical));
+    if (linkedInside !== undefined) {
+      return {
+        repositoryMatch: "linked-worktree",
+        pathMapping: {
+          repositoryRoot: path.resolve(linkedInside.path),
           historicalCwd: canonical,
         },
       };
@@ -628,8 +780,8 @@ async function classifyRepository(
     summary.initialCwd,
     ...summary.workingDirectories,
   ].filter((value): value is string => value !== undefined))];
-  let foundIncompatible = false;
   let foundUnresolved = false;
+  let foundIncompatible = false;
   let match: CorrelationRepositoryMatch = "unknown";
   let pathMapping: HistoricalPathMapping | null = null;
   let initialResolution: HistoricalDirectoryResolution = {
@@ -657,28 +809,19 @@ async function classifyRepository(
   }
 
   return {
-    repositoryMatch: foundIncompatible ? "incompatible" : match,
+    repositoryMatch: match !== "unknown"
+      ? match
+      : foundUnresolved
+        ? "unknown"
+        : foundIncompatible
+          ? "incompatible"
+          : "unknown",
     pathMapping,
     initialResolution,
     cwdlessResolution: foundIncompatible || foundUnresolved || directories.length === 0
       ? null
       : initialResolution,
   };
-}
-
-function fullRepositoryMatch(
-  summaryMatch: CorrelationRepositoryMatch,
-  assessment: RepositoryAssessment,
-): CorrelationRepositoryMatch {
-  if (assessment.initialResolution.repositoryMatch === "incompatible") {
-    return "incompatible";
-  }
-  if (assessment.repositoryMatch !== "incompatible" && assessment.repositoryMatch !== "unknown") {
-    return assessment.repositoryMatch;
-  }
-  return assessment.initialResolution.repositoryMatch === "unknown"
-    ? summaryMatch
-    : assessment.initialResolution.repositoryMatch;
 }
 
 function referenceRank(references: readonly ResolvedCommitReference[]): number {
@@ -784,32 +927,134 @@ async function discover(
   };
 }
 
-export async function correlateCodex(
+function scanBundle(scan: AgentSummaryRelevanceScan): AgentEvidenceBundle {
+  return {
+    session: scan.summary,
+    evidence: scan.correlationEvidence.evidence,
+    unknownRecordCount: scan.correlationEvidence.unknownRecordCount,
+    diagnostics: scan.summary.diagnostics,
+  };
+}
+
+function fallbackScan(ref: AgentSessionRef): AgentSummaryRelevanceScan {
+  const summary = fallbackSummary(ref, "unreadable-transcript");
+  return {
+    ref,
+    summary,
+    correlationEvidence: { evidence: [], unknownRecordCount: 0 },
+    relevanceCoverage: { status: "limited", reasons: ["unreadable-transcript"] },
+    bytesRead: 0,
+    recordsSeen: 0,
+    sourceSignature: null,
+  };
+}
+
+function scanLimitations(scan: AgentSummaryRelevanceScan): readonly CorrelationLimitation[] {
+  const result: CorrelationLimitation[] = [];
+  for (const reason of scan.relevanceCoverage.reasons) {
+    switch (reason) {
+      case "changed-during-read":
+        result.push(limitation("changed-during-read", true));
+        break;
+      case "partial-record":
+      case "corrupt-record":
+      case "unreadable-transcript":
+        result.push(limitation("corrupt-transcript", true));
+        break;
+      case "material-compaction":
+      case "material-rollback-or-abort":
+        break;
+      case "retention-limit":
+      case "unsupported-relevance-record":
+      case "unlinked-patch-result":
+      case "invalid-durable-patch-terminal":
+      case "unclassified-patch-change":
+      case "missing-effective-cwd":
+        result.push(limitation("summary-coverage", true));
+        break;
+      default:
+        break;
+    }
+  }
+  return result;
+}
+
+function discoveryNamespaceChanged(
+  opening: AgentHistoryDiscoveryResult,
+  closing: AgentHistoryDiscoveryResult,
+): boolean {
+  if (opening.namespaceSignature !== undefined || closing.namespaceSignature !== undefined) {
+    return opening.namespaceSignature !== closing.namespaceSignature;
+  }
+  if (opening.availability !== closing.availability) return true;
+  const key = (ref: AgentSessionRef): string => ref.sourceKind + "\0" + ref.sourcePath;
+  const openingRefs = opening.refs.map(key).sort();
+  const closingRefs = closing.refs.map(key).sort();
+  return openingRefs.length !== closingRefs.length
+    || openingRefs.some((value, index) => value !== closingRefs[index]);
+}
+
+function hasPatchEvidence(scan: AgentSummaryRelevanceScan): boolean {
+  return scan.correlationEvidence.evidence.some((value) =>
+    value.kind === "patch-attempt" || value.kind === "patch-result");
+}
+
+function scanPathClassificationIsComplete(
+  scan: AgentSummaryRelevanceScan,
+  summary: AgentSessionSummary,
+  repositoryMatch: CorrelationRepositoryMatch,
+  pathMapping: HistoricalPathMapping | null,
+): boolean {
+  if (repositoryMatch === "unknown" || repositoryMatch === "incompatible") return false;
+  const patchEvidence = scan.correlationEvidence.evidence.filter((value) =>
+    value.kind === "patch-result" && value.reportedSuccess === true);
+  if (patchEvidence.length === 0) return true;
+  if (summary.workingDirectories.length > 1 || summary.initialCwd === undefined) return false;
+  if (pathMapping === null
+    || path.resolve(pathMapping.historicalCwd) !== path.resolve(pathMapping.repositoryRoot)) {
+    return false;
+  }
+  return patchEvidence.every((value) => value.cwd === summary.initialCwd);
+}
+
+interface ProjectionOutcome {
+  readonly input: CorrelationCandidateInput;
+  readonly projected: boolean;
+  readonly possibility: CandidateStrongPossibility;
+}
+
+async function correlateCodexHardened(
   options: CorrelateCodexOptions,
 ): Promise<CorrelationResult> {
-  const source = options.agentHistorySource ?? codexHistorySource;
-  const discoveryContext = options.codexHome === undefined
+  const totalStartedAt = performance.now();
+  const discoveryContext: AgentHistoryDiscoveryContext | undefined = options.codexHome === undefined
     ? undefined
     : { historyRoot: options.codexHome };
+  const source = options.agentHistorySource
+    ?? new CodexHistorySource(options.codexHome === undefined ? {} : { codexHome: options.codexHome });
   const discovery = await discover(source, discoveryContext);
-  const coverageLimitations = [
-    ...discoveryDiagnosticLimitations(discovery.diagnostics),
-  ];
+  const coverageLimitations = [...discoveryDiagnosticLimitations(discovery.diagnostics)];
 
   if (discovery.availability === "unavailable") {
-    return correlate(options.target, [], {
+    const result = correlate(options.target, [], {
       status: "unavailable",
       discoveredRefs: discovery.refs.length,
-      summaryEligibleRefs: 0,
-      fullyExtractedRefs: 0,
-      omittedEligibleRefs: 0,
-      limitations: [
-        limitation("discovery-unavailable", true),
-        ...coverageLimitations,
-      ],
+      usableSummaryRefs: 0,
+      incompatibleRefs: 0,
+      provenNotStrongRefs: 0,
+      potentiallyStrongRefs: 0,
+      fullyProjectedRefs: 0,
+      omittedPotentiallyStrongRefs: 0,
+      limitations: [limitation("discovery-unavailable", true), ...coverageLimitations],
     });
+    recordEmptyCorrelationTelemetry(
+      options.telemetry,
+      discovery.refs.length,
+      performance.now() - totalStartedAt,
+      result,
+    );
+    return result;
   }
-
   if (discovery.refs.length === 0 && discovery.availability === "available") {
     coverageLimitations.push(limitation("empty-readable-store", false));
   }
@@ -817,130 +1062,251 @@ export async function correlateCodex(
     coverageLimitations.push(limitation("discovery-limited", true));
   }
 
-  const staged = await Promise.all(discovery.refs.map(async (ref): Promise<SummaryCandidate> => {
-    let summary: AgentSessionSummary;
+  const defaults = defaultCorrelationWorkLimits(discovery.refs.length);
+  const defaultScanWorkers = Math.max(1, defaults.scanWorkers);
+  const defaultGitProcessSlots = Math.max(1, defaults.gitProcessSlots);
+  const defaultProjectionWorkers = Math.max(1, defaults.projectionWorkers);
+  const limits: CorrelationWorkLimits = {
+    scanWorkers: options.workLimits?.scanWorkers ?? defaultScanWorkers,
+    gitProcessSlots: options.workLimits?.gitProcessSlots ?? defaultGitProcessSlots,
+    projectionWorkers: options.workLimits?.projectionWorkers ?? defaultProjectionWorkers,
+  };
+  const targetHint = extractionTarget(options.target, options.location);
+  const scanPool = new BoundedWorkPool(limits.scanWorkers);
+  const scanned = await scanPool.map(discovery.refs, async (ref) => {
     try {
-      summary = await source.readSummary(ref);
+      return await source.scanSummaryAndRelevance(ref, targetHint);
     } catch {
-      summary = fallbackSummary(ref, "unreadable-transcript");
+      return fallbackScan(ref);
     }
-    const assessment = await classifyRepository(options.git, options.repository, summary);
+  });
+
+  const closingDiscovery = await discover(source, discoveryContext);
+  if (discoveryNamespaceChanged(discovery, closingDiscovery)) {
+    coverageLimitations.push(limitation("changed-during-read", true));
+  }
+
+  const gate = new GitWorkGate(limits.gitProcessSlots);
+  const git = new InvocationGitRunner(options.git, gate);
+  const classifiedPool = new BoundedWorkPool(limits.gitProcessSlots);
+  const staged = await classifiedPool.map(scanned, async (scan): Promise<SummaryCandidate> => {
+    const summary = scan.summary;
+    const assessment = await classifyRepository(git, options.repository, summary);
     const references = await resolveReferences(
-      options.git,
+      git,
       options.repository,
       options.target,
       summaryReferences(summary),
     );
+    const possibility = classifyStrongPossibility({
+      repositoryMatch: assessment.repositoryMatch,
+      correlationEvidence: {
+        evidence: scan.correlationEvidence.evidence,
+        unknownRecordCount: scan.correlationEvidence.unknownRecordCount,
+      },
+      relevanceCoverage: scan.relevanceCoverage,
+      targetAliases: targetPathAliases(options.target),
+      pathClassificationComplete: scanPathClassificationIsComplete(
+        scan,
+        summary,
+        assessment.repositoryMatch,
+        assessment.pathMapping,
+      ),
+    });
+    const candidateLimitations = [
+      ...diagnosticLimitations(summary.diagnostics),
+      ...scanLimitations(scan),
+    ];
     const request: CandidateBuildRequest = {
       session: projectSessionSummary(summary),
       evidence: null,
-      repositoryMatch: assessment.repositoryMatch,
+      repositoryMatch: possibility.state === "excluded" ? "incompatible" : assessment.repositoryMatch,
       references,
-      coverageLimitations: diagnosticLimitations(summary.diagnostics),
+      coverageLimitations: candidateLimitations,
     };
     return {
-      ref,
+      ref: scan.ref,
+      scan,
       summary,
       repositoryMatch: assessment.repositoryMatch,
       pathMapping: assessment.pathMapping,
+      cwdlessResolution: assessment.cwdlessResolution,
       references,
       input: buildCandidateInput(request),
+      possibility,
     };
-  }));
+  });
 
-  const ordered = [...staged].sort((left, right) =>
-    compareStagedCandidates(left, right, options.target));
-  const eligible = ordered.filter((candidate) => candidate.input.eligible);
-  const selectedForExtraction = eligible.slice(0, MAX_FULL_EVIDENCE_CANDIDATES);
+  const ordered = [...staged].sort((left, right) => compareStagedCandidates(left, right, options.target));
+  const potentiallyStrong = ordered.filter((candidate) =>
+    candidate.input.eligible && candidate.possibility.state === "cannot-prove");
+  const selectedForProjection = potentiallyStrong.slice(0, MAX_FULL_EVIDENCE_CANDIDATES);
   const inputs = new Map<string, CorrelationCandidateInput>(
     staged.map((candidate) => [candidate.ref.sourcePath, candidate.input]),
   );
-  const targetHint = extractionTarget(options.target, options.location);
-  let fullyExtractedRefs = 0;
-
-  for (const candidate of selectedForExtraction) {
-    let bundle: AgentEvidenceBundle | null = null;
-    let extractionLimitations: readonly CorrelationLimitation[] = [];
-    try {
-      bundle = await source.extractEvidence(candidate.ref, targetHint);
-      fullyExtractedRefs += 1;
-    } catch {
-      extractionLimitations = [limitation("corrupt-transcript", true)];
-    }
-
-    const evidenceSession = bundle?.session ?? candidate.summary;
-    const evidenceAssessment = bundle === null
-      ? null
-      : await classifyRepository(options.git, options.repository, evidenceSession);
-    const historicalAnchorPaths = bundle !== null
-      && evidenceAssessment?.repositoryMatch === "unknown"
-      && (candidate.repositoryMatch === "unknown"
-        || candidate.repositoryMatch === "historical-commit-anchored")
-      && hasResolvedTargetAnchor(candidate.references)
-      ? targetPathAliases(options.target)
-      : null;
-    const fullRepositoryMatchValue = bundle === null
-      ? candidate.repositoryMatch
-      : evidenceAssessment === null
-        ? candidate.repositoryMatch
-        : fullRepositoryMatch(candidate.repositoryMatch, evidenceAssessment);
-    const cwdlessCoverageLimitations = bundle !== null
-      && evidenceAssessment?.cwdlessResolution === null
-      && bundle.evidence.some((value) =>
-        value.cwd === undefined
-          && evidenceMayAffectCorrelation(value)
-          && (historicalAnchorPaths === null || !hasNormalizedPatchPaths(value)))
-      ? [limitation("summary-coverage", true)]
-      : [];
-    const projectedBundle = bundle === null
-      ? null
-      : await projectEvidenceBundle(
-        bundle,
-        options.repository,
-        options.git,
-        evidenceAssessment?.cwdlessResolution ?? null,
-        historicalAnchorPaths,
-      );
-    const fullReferences = bundle === null
-      ? candidate.references
-      : await resolveReferences(
-        options.git,
-        options.repository,
-        options.target,
-        [...summaryReferences(candidate.summary), ...evidenceReferences(projectedBundle ?? bundle)],
-      );
-    const fullRequest: CandidateBuildRequest = {
-      session: projectSessionSummary(evidenceSession),
-      evidence: projectedBundle,
-      repositoryMatch: fullRepositoryMatchValue,
-      references: fullReferences,
-      coverageLimitations: [
-        ...candidate.input.coverageLimitations,
-        ...extractionLimitations,
-        ...cwdlessCoverageLimitations,
-      ],
-    };
-    inputs.set(candidate.ref.sourcePath, buildCandidateInput(fullRequest));
-  }
-
-  const omittedEligibleRefs = Math.max(eligible.length - selectedForExtraction.length, 0);
-  const finalLimitations = [...coverageLimitations];
-  for (const kind of ["unsupported-summary", "unresolved-repository-candidate"] as const) {
-    const count = staged.filter((candidate) =>
-      candidate.input.coverageLimitations.some((value) => value.kind === kind)).length;
-    if (count > 0) finalLimitations.push(limitation(kind, true, count));
-  }
-  if (omittedEligibleRefs > 0) {
-    finalLimitations.push(limitation("candidate-cap", true, omittedEligibleRefs));
-  }
-  const finalCoverage = {
-    status: discovery.availability === "limited" ? "limited" as const : "complete" as const,
-    discoveredRefs: discovery.refs.length,
-    summaryEligibleRefs: eligible.length,
-    fullyExtractedRefs,
-    omittedEligibleRefs,
-    limitations: finalLimitations,
+  let fullyProjectedRefs = 0;
+  let projectionStats: BoundedWorkStats = {
+    wallMs: 0,
+    queueMsSum: 0,
+    queueMsMax: 0,
+    workMsSum: 0,
   };
+  let projectionOutcomes: ProjectionOutcome[] = [];
+  if (selectedForProjection.length > 0) {
+    const projectionPool = new BoundedWorkPool(limits.projectionWorkers);
+    projectionOutcomes = await projectionPool.map(selectedForProjection, async (candidate): Promise<ProjectionOutcome> => {
+      const rawBundle = scanBundle(candidate.scan);
+      if (!hasPatchEvidence(candidate.scan)) {
+        return {
+          projected: true,
+          possibility: candidate.possibility,
+          input: buildCandidateInput({
+            session: projectSessionSummary(candidate.summary),
+            evidence: rawBundle,
+            repositoryMatch: candidate.repositoryMatch,
+            references: candidate.references,
+            coverageLimitations: candidate.input.coverageLimitations,
+          }),
+        };
+      }
 
-  return correlate(options.target, [...inputs.values()], finalCoverage);
+      const historicalAnchorPaths = candidate.repositoryMatch === "unknown"
+        && hasResolvedTargetAnchor(candidate.references)
+        ? targetPathAliases(options.target)
+        : null;
+      let projectedBundle: AgentEvidenceBundle | null = null;
+      let projectionLimitations: readonly CorrelationLimitation[] = [];
+      let projectionComplete = false;
+      try {
+        const projectedResult = await projectEvidenceBundle(
+          rawBundle,
+          options.repository,
+          git,
+          candidate.cwdlessResolution,
+          historicalAnchorPaths,
+        );
+        const originalChanges = rawBundle.evidence
+          .filter((value) => value.kind === "patch-result")
+          .flatMap((value) => value.patch?.changes ?? []);
+        const projectedChanges = projectedResult.bundle.evidence
+          .filter((value) => value.kind === "patch-result")
+          .flatMap((value) => value.patch?.changes ?? []);
+        const allChangesKnownIncompatible = originalChanges.length > 0
+          && projectedChanges.length === 0
+          && projectedResult.droppedIncompatibleChanges === originalChanges.length;
+        projectionComplete = !allChangesKnownIncompatible
+          && projectedChanges.length + projectedResult.droppedIncompatibleChanges
+            === originalChanges.length;
+        projectedBundle = projectedResult.bundle;
+        if (!projectionComplete && !allChangesKnownIncompatible) {
+          projectionLimitations = [limitation("summary-coverage", true)];
+        }
+      } catch {
+        projectionLimitations = [limitation("corrupt-transcript", true)];
+      }
+      if (projectedBundle === null) {
+        return {
+          projected: false,
+          possibility: candidate.possibility,
+          input: buildCandidateInput({
+            session: projectSessionSummary(candidate.summary),
+            evidence: null,
+            repositoryMatch: candidate.repositoryMatch,
+            references: candidate.references,
+            coverageLimitations: [...candidate.input.coverageLimitations, ...projectionLimitations],
+          }),
+        };
+      }
+      const possibility = classifyStrongPossibility({
+        repositoryMatch: candidate.repositoryMatch,
+        correlationEvidence: {
+          evidence: projectedBundle.evidence,
+          unknownRecordCount: candidate.scan.correlationEvidence.unknownRecordCount,
+        },
+        relevanceCoverage: candidate.scan.relevanceCoverage,
+        targetAliases: targetPathAliases(options.target),
+        pathClassificationComplete: projectionComplete,
+      });
+      return {
+        projected: true,
+        possibility,
+        input: buildCandidateInput({
+          session: projectSessionSummary(candidate.summary),
+          evidence: projectedBundle,
+          repositoryMatch: candidate.repositoryMatch,
+          references: candidate.references,
+          coverageLimitations: [...candidate.input.coverageLimitations, ...projectionLimitations],
+        }),
+      };
+    });
+    fullyProjectedRefs = projectionOutcomes.filter((value) => value.projected).length;
+    projectionOutcomes.forEach((value, ordinal) => {
+      const candidate = selectedForProjection[ordinal];
+      if (candidate !== undefined) inputs.set(candidate.ref.sourcePath, value.input);
+    });
+    projectionStats = projectionPool.stats;
+  }
+
+  const projectedPossibilities = new Map<string, CandidateStrongPossibility>(
+    staged.map((candidate) => [candidate.ref.sourcePath, candidate.possibility]),
+  );
+  projectionOutcomes.forEach((value, ordinal) => {
+    const candidate = selectedForProjection[ordinal];
+    if (candidate !== undefined) projectedPossibilities.set(candidate.ref.sourcePath, value.possibility);
+  });
+
+  const finalLimitations = [...coverageLimitations];
+  const unsupportedSummaryCount = staged.filter((candidate) =>
+    candidate.input.coverageLimitations.some((value) => value.kind === "unsupported-summary")).length;
+  const unresolvedCount = staged.filter((candidate) =>
+    candidate.input.coverageLimitations.some((value) => value.kind === "unresolved-repository-candidate")).length;
+  if (unsupportedSummaryCount > 0) {
+    finalLimitations.push(limitation("unsupported-summary", true, unsupportedSummaryCount));
+  }
+  if (unresolvedCount > 0) {
+    finalLimitations.push(limitation("unresolved-repository-candidate", true, unresolvedCount));
+  }
+  const omittedPotentiallyStrongRefs = Math.max(potentiallyStrong.length - selectedForProjection.length, 0);
+  if (omittedPotentiallyStrongRefs > 0) {
+    finalLimitations.push(limitation("candidate-cap", true, omittedPotentiallyStrongRefs));
+  }
+  const provenNotStrongRefs = staged.filter((candidate) =>
+    projectedPossibilities.get(candidate.ref.sourcePath)?.state === "proven-not-strong").length;
+  const incompatibleRefs = staged.filter((candidate) =>
+    projectedPossibilities.get(candidate.ref.sourcePath)?.state === "excluded").length;
+  const potentiallyStrongRefs = staged.filter((candidate) =>
+    candidate.input.eligible
+      && projectedPossibilities.get(candidate.ref.sourcePath)?.state === "cannot-prove").length;
+  const usableSummaryRefs = staged.filter((candidate) => candidate.summary.sessionId !== null).length;
+  const status = discovery.availability === "limited" || finalLimitations.some((value) => value.material)
+    ? "limited" as const
+    : "complete" as const;
+  const result = correlate(options.target, [...inputs.values()], {
+    status,
+    discoveredRefs: discovery.refs.length,
+    usableSummaryRefs,
+    incompatibleRefs,
+    provenNotStrongRefs,
+    potentiallyStrongRefs,
+    fullyProjectedRefs,
+    omittedPotentiallyStrongRefs,
+    limitations: finalLimitations,
+  });
+  recordCorrelationTelemetry(options.telemetry, result, staged, {
+    discoveredRefs: discovery.refs.length,
+    bytesScanned: scanned.reduce((total, value) => total + value.bytesRead, 0),
+    scan: scanPool.stats,
+    git: gate.stats,
+    gitCalls: git.calls,
+    projection: projectionStats,
+    projectedCandidates: selectedForProjection.length,
+    totalMs: performance.now() - totalStartedAt,
+  });
+  return result;
+}
+
+export async function correlateCodex(
+  options: CorrelateCodexOptions,
+): Promise<CorrelationResult> {
+  return correlateCodexHardened(options);
 }

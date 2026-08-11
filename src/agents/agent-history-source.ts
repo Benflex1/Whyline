@@ -31,6 +31,49 @@ export interface AgentHistoryDiscoveryResult {
   readonly availability: AgentHistoryAvailability;
   readonly refs: readonly AgentSessionRef[];
   readonly diagnostics: readonly AgentDiagnostic[];
+  /** Opaque invocation-local membership/readability comparison token. */
+  readonly namespaceSignature?: string | undefined;
+}
+
+export interface AgentSourceSignature {
+  readonly device: number;
+  readonly inode: number;
+  readonly size: number;
+  readonly mtimeNs: bigint;
+}
+
+export type AgentRelevanceCoverageReason =
+  | "changed-during-read"
+  | "partial-record"
+  | "corrupt-record"
+  | "material-compaction"
+  | "material-rollback-or-abort"
+  | "unsupported-relevance-record"
+  | "unlinked-patch-result"
+  | "invalid-durable-patch-terminal"
+  | "unclassified-patch-change"
+  | "missing-effective-cwd"
+  | "retention-limit"
+  | "unreadable-transcript";
+
+export interface AgentRelevanceCoverage {
+  readonly status: "complete" | "limited";
+  readonly reasons: readonly AgentRelevanceCoverageReason[];
+}
+
+export interface AgentCorrelationEvidenceProjection {
+  readonly evidence: readonly AgentEvidence[];
+  readonly unknownRecordCount: number;
+}
+
+export interface AgentSummaryRelevanceScan {
+  readonly ref: AgentSessionRef;
+  readonly summary: AgentSessionSummary;
+  readonly correlationEvidence: AgentCorrelationEvidenceProjection;
+  readonly relevanceCoverage: AgentRelevanceCoverage;
+  readonly bytesRead: number;
+  readonly recordsSeen: number;
+  readonly sourceSignature: AgentSourceSignature | null;
 }
 
 export type AgentCommitReferenceKind = "session-head" | "produced-commit" | "unknown";
@@ -104,10 +147,16 @@ export interface AgentPatchChange {
 
 export interface AgentPatchEvidence {
   readonly callId: string;
+  /** Closed normalized origins; legacy synthetic callers may omit this field. */
+  readonly evidenceOrigins?: readonly AgentPatchEvidenceOrigin[];
   readonly reportedSuccess?: boolean | undefined;
   readonly status?: string | undefined;
   readonly changes: readonly AgentPatchChange[];
 }
+
+export type AgentPatchEvidenceOrigin =
+  | "linked-request-result"
+  | "self-contained-durable-terminal";
 
 export interface AgentEvidence {
   readonly id: string;
@@ -172,6 +221,10 @@ export interface AgentHistorySource {
   discoverWithDiagnostics?(
     context?: AgentHistoryDiscoveryContext,
   ): Promise<AgentHistoryDiscoveryResult>;
+  scanSummaryAndRelevance(
+    ref: AgentSessionRef,
+    target?: AgentEvidenceTarget,
+  ): Promise<AgentSummaryRelevanceScan>;
   readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary>;
   extractEvidence(
     ref: AgentSessionRef,

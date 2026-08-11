@@ -5,8 +5,10 @@ import path from "node:path";
 
 import type {
   AgentDiagnostic,
+  AgentRelevanceCoverageReason,
   AgentSessionRef,
   AgentSessionSummary,
+  AgentSourceSignature,
 } from "../agent-history-source.js";
 import {
   DEFAULT_MAX_JSONL_LINE_BYTES,
@@ -32,6 +34,7 @@ export interface TranscriptRecordContext {
   /** The latest cwd from a supported structured transcript record. */
   readonly effectiveCwd: string | undefined;
   addDiagnostic(value: AgentDiagnostic): void;
+  addRelevanceReason(value: AgentRelevanceCoverageReason): void;
 }
 
 export type TranscriptRecordVisitor = (
@@ -50,14 +53,12 @@ export interface ParsedTranscript {
   readonly diagnostics: readonly AgentDiagnostic[];
   readonly unknownRecordCount: number;
   readonly recordsSeen: number;
+  readonly bytesRead: number;
+  readonly sourceSignature: AgentSourceSignature | null;
+  readonly relevanceReasons: readonly AgentRelevanceCoverageReason[];
 }
 
-interface FileSignature {
-  readonly size: number;
-  readonly mtimeMs: number;
-  readonly ino: number;
-  readonly dev: number;
-}
+type FileSignature = AgentSourceSignature;
 
 const KNOWN_OUTER_TYPES = new Set([
   "session_meta",
@@ -101,12 +102,12 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 
 async function readFileSignature(sourcePath: string): Promise<FileSignature | undefined> {
   try {
-    const metadata = await stat(sourcePath);
+    const metadata = await stat(sourcePath, { bigint: true });
     return {
-      size: metadata.size,
-      mtimeMs: metadata.mtimeMs,
-      ino: metadata.ino,
-      dev: metadata.dev,
+      size: Number(metadata.size),
+      mtimeNs: metadata.mtimeNs,
+      inode: Number(metadata.ino),
+      device: Number(metadata.dev),
     };
   } catch {
     return undefined;
@@ -115,9 +116,9 @@ async function readFileSignature(sourcePath: string): Promise<FileSignature | un
 
 function signaturesDiffer(left: FileSignature, right: FileSignature): boolean {
   return left.size !== right.size
-    || left.mtimeMs !== right.mtimeMs
-    || left.ino !== right.ino
-    || left.dev !== right.dev;
+    || left.mtimeNs !== right.mtimeNs
+    || left.inode !== right.inode
+    || left.device !== right.device;
 }
 
 class SummaryBuilder {
@@ -548,7 +549,13 @@ function parseOuterRecord(
     return undefined;
   }
 
-  const type = safeToken(parsed.type, 96);
+  const rawType = parsed.type;
+  const type = typeof rawType === "string"
+    && rawType.length > 0
+    && rawType.length <= 96
+    && rawType === rawType.trim()
+    ? rawType
+    : undefined;
   const payload = isRecord(parsed.payload) ? parsed.payload : undefined;
   if (type === undefined || payload === undefined) {
     builder.addDiagnostic(
@@ -571,8 +578,10 @@ function parseOuterRecord(
 function recognizeRecord(
   record: TranscriptRecord,
   builder: SummaryBuilder,
+  addRelevanceReason: (value: AgentRelevanceCoverageReason) => void,
 ): { recognized: boolean; unknownCount: number } {
   if (!KNOWN_OUTER_TYPES.has(record.type)) {
+    addRelevanceReason("unsupported-relevance-record");
     return {
       recognized: false,
       unknownCount: addUnknownDiagnostic(builder, record.recordNumber, "unknown outer record"),
@@ -580,8 +589,11 @@ function recognizeRecord(
   }
 
   if (record.type === "event_msg") {
-    const payloadType = safeToken(record.payload.type);
+    const payloadType = typeof record.payload.type === "string"
+      ? record.payload.type
+      : undefined;
     if (payloadType === undefined || !KNOWN_EVENT_TYPES.has(payloadType)) {
+      addRelevanceReason("unsupported-relevance-record");
       return {
         recognized: false,
         unknownCount: addUnknownDiagnostic(builder, record.recordNumber, "unknown event record"),
@@ -592,6 +604,7 @@ function recognizeRecord(
   if (record.type === "response_item") {
     const payloadType = safeToken(record.payload.type);
     if (payloadType === undefined || !KNOWN_RESPONSE_TYPES.has(payloadType)) {
+      addRelevanceReason("unsupported-relevance-record");
       return {
         recognized: false,
         unknownCount: addUnknownDiagnostic(builder, record.recordNumber, "unknown response record"),
@@ -616,6 +629,9 @@ export async function parseTranscript(
       diagnostics: summary.diagnostics,
       unknownRecordCount: 0,
       recordsSeen: 0,
+      bytesRead: 0,
+      sourceSignature: null,
+      relevanceReasons: ["unreadable-transcript"],
     };
   }
   const before = await readFileSignature(ref.sourcePath);
@@ -628,6 +644,9 @@ export async function parseTranscript(
       diagnostics: summary.diagnostics,
       unknownRecordCount: 0,
       recordsSeen: 0,
+      bytesRead: 0,
+      sourceSignature: null,
+      relevanceReasons: ["unreadable-transcript"],
     };
   }
 
@@ -639,6 +658,11 @@ export async function parseTranscript(
   let physicalLineNumber = 0;
   let recordsSeen = 0;
   let unknownRecordCount = 0;
+  let bytesRead = 0;
+  const relevanceReasons = new Set<AgentRelevanceCoverageReason>();
+  input.on("data", (chunk: string | Buffer) => {
+    bytesRead += typeof chunk === "string" ? Buffer.byteLength(chunk, "utf8") : chunk.byteLength;
+  });
 
   const consumeLine = async (
     item: { readonly line: string; readonly recordNumber: number },
@@ -650,7 +674,7 @@ export async function parseTranscript(
     }
     recordsSeen += 1;
     builder.observeTimestamp(record.timestamp);
-    const recognition = recognizeRecord(record, builder);
+    const recognition = recognizeRecord(record, builder, (reason) => relevanceReasons.add(reason));
     unknownRecordCount += recognition.unknownCount;
     if (!recognition.recognized) {
       return;
@@ -661,6 +685,7 @@ export async function parseTranscript(
         session: builder.snapshot(),
         effectiveCwd: builder.currentEffectiveCwd(),
         addDiagnostic: (value) => builder.addDiagnostic(value),
+        addRelevanceReason: (value) => relevanceReasons.add(value),
       });
     }
   };
@@ -699,12 +724,48 @@ export async function parseTranscript(
     builder.addDiagnostic(diagnostic("missing-session-metadata", undefined, "session metadata unavailable"));
   }
 
+  for (const value of builder.snapshot().diagnostics) {
+    switch (value.kind) {
+      case "changed-during-read":
+        relevanceReasons.add("changed-during-read");
+        break;
+      case "partial-final-record":
+        relevanceReasons.add("partial-record");
+        break;
+      case "corrupt-non-final-record":
+        relevanceReasons.add("corrupt-record");
+        break;
+      case "compacted-history":
+      case "context-compaction":
+        relevanceReasons.add("material-compaction");
+        break;
+      case "thread-rollback":
+      case "turn-aborted":
+        relevanceReasons.add("material-rollback-or-abort");
+        break;
+      case "retention-limit":
+        relevanceReasons.add("retention-limit");
+        break;
+      case "unreadable-transcript":
+        relevanceReasons.add("unreadable-transcript");
+        break;
+      default:
+        break;
+    }
+  }
+
   const summary = builder.snapshot();
+  const sourceSignature = before !== undefined && after !== undefined && !signaturesDiffer(before, after)
+    ? before
+    : null;
   return {
     summary,
     diagnostics: summary.diagnostics,
     unknownRecordCount,
     recordsSeen,
+    bytesRead,
+    sourceSignature,
+    relevanceReasons: [...relevanceReasons],
   };
 }
 

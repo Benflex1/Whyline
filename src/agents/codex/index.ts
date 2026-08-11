@@ -7,6 +7,7 @@ export {
 } from "./discover.js";
 export {
   extractCodexEvidence,
+  scanCodexSummaryAndRelevance,
 } from "./extract-evidence.js";
 export {
   parseTranscript,

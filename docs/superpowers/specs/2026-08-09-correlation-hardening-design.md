@@ -24,9 +24,17 @@ does the work beneath that contract.
 5. The first controlled real corpus contains only P1 and P2: one actual
    positive and one actual two-strong-candidate ambiguity. P3-P6 follow only
    after P1/P2 establish the primary path.
-6. Preservation of safety semantics is the hard gate. A fresh approximately
-   400 MiB benchmark and material latency improvement are required evidence,
-   but `<2 seconds` is not a correctness or milestone gate.
+6. Preservation of safety and correctness semantics remains the hard gate. The
+   intended >=20% benchmark remains a performance objective. The frozen
+   comparable workload became unavailable when the local store changed from
+   291 files / 411,058,543 bytes to 314 files / 441,430,099 bytes; no substitute
+   workload was used. Performance is therefore unmeasured/deferred for this
+   milestone, neither passed nor failed. This does not authorize weakening
+   correctness or privacy. `<2 seconds` is not a correctness or milestone gate.
+7. A Codex `event_msg / patch_apply_end` in the exact durable 0.147.0 shape may
+   be a self-contained supported patch operation without a persisted
+   `patch_apply_begin` or `apply_patch` request. This is a closed schema
+   correction, not chronological inference or a relaxation of `strong`.
 
 The governing invariant remains:
 
@@ -48,6 +56,18 @@ extracted, and 24 were correctly omitted with material coverage. Therefore this
 design targets scan duplication, Git call multiplication, and unbounded process
 fan-out; it does not weaken the rich overlap contract or disguise an omitted
 potentially-strong candidate.
+
+A subsequent isolated actual-source proof used Codex CLI 0.147.0 with GPT-5.6
+Terra Medium, a dedicated authenticated `CODEX_HOME`, an invented-content
+no-remote repository, and an isolated rootless Bubblewrap environment. It
+persisted zero `patch_apply_begin` records and one successful, completed
+`event_msg / patch_apply_end` with `call_id`, `turn_id`, and structured
+`changes`; the only surrounding custom tool call was `exec`. Codex protocol and
+persistence semantics establish that this is intentional Legacy history:
+`PatchApplyEnd` is durable while `PatchApplyBegin` and `PatchApplyUpdated` are
+transient. That evidence authorizes only the exact terminal shape frozen below.
+It does not authorize arbitrary `event_msg` records, `exec` output, or temporal
+adjacency as patch provenance. P1 and P2 have not yet been run.
 
 ## Scope and non-goals
 
@@ -185,6 +205,7 @@ type AgentRelevanceCoverageReason =
   | "material-rollback-or-abort"
   | "unsupported-relevance-record"
   | "unlinked-patch-result"
+  | "invalid-durable-patch-terminal"
   | "unclassified-patch-change"
   | "missing-effective-cwd"
   | "retention-limit"
@@ -240,8 +261,11 @@ Node filesystem API requires it; equality semantics, not the representation,
 are fixed.
 
 `correlationEvidence` contains only evidence consumed by the current scorer:
-structured patch attempts/results and normalized commit references. It omits
-commands, streamed input, MCP operations, prompts, prose, reasoning, and tool
+normalized supported patch operations and normalized commit references. A
+supported patch operation may originate from an explicitly linked structured
+request/result pair or from the closed self-contained durable terminal shape
+below. It omits commands, streamed input, MCP operations, prompts, prose,
+reasoning, and tool
 output because none can affect the current correlation result. Patch payloads
 are reduced during the stream to the existing bounded, non-reversible
 fingerprints, numeric hunk ranges, operation kind, result linkage/success,
@@ -254,6 +278,126 @@ artifact; it does not reopen the rollout. The old `readSummary` and
 wrappers, but `correlateCodex` must not call them on the new Codex path. They are
 not the milestone's authoritative execution path.
 
+### Supported structured patch operation normalization
+
+Whyline normalizes exactly two patch-evidence representations into one logical
+supported patch-operation model. The normalized operation retains a closed
+`evidenceOrigins` set whose only members are `linked-request-result` and
+`self-contained-durable-terminal`. The set may contain both only after the
+exact-ID compatible deduplication below; downstream scoring must not infer one
+origin from the other.
+
+#### A. Linked request/result patch evidence
+
+Existing supported variants remain unchanged. A persisted structured patch
+request/call and its result must be explicitly linked by the format's operation
+identity, and the result must report success under that format's existing
+supported contract. Missing or ambiguous linkage for a shape whose semantics
+require a separate request/result remains material `unlinked-patch-result`.
+
+#### B. Self-contained durable terminal patch evidence
+
+Only the empirically established Codex Legacy shape is authorized: the outer
+record discriminator is exactly `event_msg`, the payload discriminator is
+exactly `patch_apply_end`, and the payload satisfies all of these requirements:
+
+- `call_id` and `turn_id` are present as strings of 1–256 JavaScript string code
+  units, contain a non-whitespace character, and can be retained exactly without
+  truncation or normalization. They are opaque operation/turn identities, not
+  proof of any missing record;
+- `success` is the Boolean `true` and `status` is exactly `completed` for a
+  successful operation. The only coherently unsuccessful terminal pairs are
+  Boolean `false` with status `failed` or `declined`. Missing, mistyped, or any
+  other success/status pairing is inconsistent;
+- `changes` is present as a complete structured change map. An empty map is
+  well-formed and supported; it represents a successful operation with no
+  applied changes and cannot directly overlap a target;
+- every entry has a safely normalizable path and exactly one supported Codex
+  `FileChange` shape: `add` with string `content`, `delete` with string
+  `content`, or `update` with string `unified_diff` and an optional safely
+  normalizable string `move_path`; absent or JSON `null` `move_path` means no
+  move;
+- relevance coverage for the terminal and its effective context is complete
+  and stable under the existing coverage model. The terminal never clears an
+  independent limitation elsewhere in the ref;
+- the event has a structured effective cwd through the existing safe cwd model,
+  and repository/path projection remains subject to all existing current,
+  linked-worktree, common-directory, historical, outside-root, and deleted-path
+  rules; and
+- the record, change map, and every material payload are complete, stable,
+  within supported bounds, and free of corruption, truncation, or an
+  unsupported relevance-bearing shape.
+
+The terminal is authoritative because Codex deliberately persists that complete
+terminal schema while omitting transient begin/update events. Its `call_id` may
+be used as a per-ref operation identity and deduplication key. It must not be
+used to assert that a missing begin/request existed.
+
+If a compatibility projection retains the existing `resultRecorded` Boolean,
+it is `true` for this origin because an authoritative durable result is
+recorded. It does not mean a separate request was observed. No synthetic
+`patch-attempt` is emitted; the closed origin must remain distinguishable.
+
+An `exec` custom tool call is never patch provenance, even when it is adjacent
+to the terminal or has the same `call_id`. Its order, timestamp, arguments, and
+result cannot supply linkage, cwd, patch content, success, or any other missing
+terminal fact. Moving or removing the `exec` record cannot change whether the
+terminal is supported. An `exec` carrying the same `call_id` is neither a
+linked patch request nor a conflict that invalidates an otherwise valid
+self-contained terminal.
+
+For a recognized terminal, normalize changes exactly as for an authoritative
+linked result: add content supplies the add-side line fingerprints; delete
+content supplies the delete-side line fingerprints; update unified diff
+supplies numeric hunk ranges and the applicable before/after line fingerprints;
+and `move_path` supplies `movedFrom`. The existing bounded, non-reversible
+fingerprint extraction, distinctiveness rules, payload limits, hunk parsing,
+path safety, and raw-payload disposal remain unchanged. Failure to recover any
+material required change or fingerprint input is limited coverage, never an
+empty or successful match.
+
+A coherent `false`/`failed` or `false`/`declined` terminal is a classified
+unsuccessful supported operation and cannot satisfy patch success. For every
+recognized `patch_apply_end`, malformed required identity fields, malformed or
+missing `changes`, unsupported change operations/payloads, or inconsistent
+success/status adds `invalid-durable-patch-terminal` (plus a more specific
+existing reason such as `unclassified-patch-change`, `missing-effective-cwd`,
+`partial-record`, or `corrupt-record` when applicable). Such a terminal is not
+converted into linked evidence and prevents a negative proof.
+
+#### Deduplication across representations
+
+Within one ref, an exact explicit patch operation/`call_id` match between a
+structured `apply_patch` request/result path and a durable `patch_apply_end`
+normalizes to one logical patch operation and one evidence sequence. The
+durable successful end supplies terminal success and applied changes; the
+persisted structured call may supply compatible request-side context. Identical
+repeated terminal facts are folded into that same operation.
+
+Facts may be merged only when they are structurally compatible. An operation
+identity reused by distinct patch requests, incompatible `turn_id`, divergent
+terminal success, incompatible normalized change facts, or any request/terminal
+disagreement that could affect repository, path, hunk, fingerprint,
+contradiction, or success classification makes relevance coverage limited;
+Whyline does not choose a winner. The `call_id` of an `exec` is excluded from
+this deduplication rule. Operations with different explicit identities are
+never deduplicated merely because content, paths, timestamps, or record
+adjacency look similar.
+
+#### Unchanged strong, confidence, contradiction, and ambiguity semantics
+
+Entering the normalized structured patch-operation model does not make a
+terminal operation `strong`. For either origin, `strong` still requires a
+successful supported operation, target-path and target-hunk relevance, at least
+two distinctive matching fingerprints, required repository/context
+compatibility, and no active structured contradiction. Existing mutation and
+coverage gates, candidate-cap materiality, confidence weights/bands, and
+contradiction precedence are unchanged. Session-head, timestamp, record order,
+and `exec` adjacency remain non-causal. Exactly one strong candidate can yield
+`matched` only with complete material coverage, while two observed strong
+candidates still yield `ambiguous` regardless of score or uncertainty
+elsewhere.
+
 ### Relevance coverage
 
 `complete` means all of the following are true:
@@ -264,7 +408,9 @@ not the milestone's authoritative execution path.
   consistently classified;
 - every record shape that could contain a supported patch call/result was
   recognized;
-- patch call/result linkage and reported-success state were classified;
+- every linked representation had classified request/result linkage, and every
+  self-contained durable terminal had classified identity and success/status
+  agreement;
 - every successful supported patch change had a classified operation and path
   shape; and
 - no compaction, rollback, abort, retention, corrupt/partial record, or
@@ -347,20 +493,28 @@ transition could matter.
 #### 2. No successful supported patch
 
 The ref is proven not strong when relevance coverage is complete and the entire
-stable scan contains no exactly linked, tool-reported-successful patch result in
-a supported structured patch shape.
+stable scan contains neither (a) an exactly linked, tool-reported-successful
+patch result in a supported structured patch shape nor (b) a successful
+supported self-contained durable terminal patch operation.
 
 Failed attempts, patch attempts without a linked successful result, commands,
-time, branch, and session-head context cannot satisfy current `strong`. An
-unlinked, unsupported, malformed, truncated, or coverage-ambiguous patch result
-prevents this proof; it is not counted as absence.
+time, branch, and session-head context cannot satisfy current `strong`. A valid
+successful empty terminal still prevents this proof. An unlinked shape that
+requires linkage, or an unsupported, malformed, success/status-inconsistent,
+truncated, or coverage-ambiguous terminal/result prevents this proof; it is not
+counted as absence. A coherent, complete `false`/`failed` or
+`false`/`declined` terminal is unsuccessful and therefore does not by itself
+prevent this proof.
 
 #### 3. All successful supported patch paths are disjoint
 
 The ref is proven not strong when relevance coverage is complete and stable,
-and every path (including `movedFrom`) of every successful supported structured
-patch result is safely normalized and classified as disjoint from the complete
-target alias set.
+and every path (including `movedFrom`) of every successful supported normalized
+patch operation, from either authorized representation, is safely normalized
+and classified as disjoint from the complete target alias set. A valid
+successful empty terminal satisfies this proof vacuously because its complete
+applied-change path set is empty; it still cannot satisfy the no-successful-
+supported-patch proof.
 
 The target alias set is the transitive closure of:
 
@@ -388,6 +542,7 @@ In particular, none of these is a negative proof:
 - unknown/deleted repository identity;
 - cwd-less or unsafely normalized patch paths;
 - unsupported or incomplete relevance coverage;
+- an invalid or success/status-inconsistent durable patch terminal;
 - a target-related result with missing/truncated payload;
 - one distinctive line;
 - non-overlap or hunk distance; or
@@ -538,26 +693,24 @@ Expected source failures are normalized and analysis continues conservatively:
 
 An internal pool invariant failure, inability to create the bounded scheduler,
 or loss of the process boundary is an operational failure and aborts the
-correlation operation. It is not silently converted into a complete `none`.
-
-After a fatal abort, queued work is not started. In-flight read streams are
-closed and in-flight Git processes receive the shared abort signal. Expected
-per-ref failures do not cancel other refs because their aggregate coverage is
-still useful.
+correlation operation. It is not silently converted into a complete `none` or
+`matched`. Already-started or queued read-only work may finish during failure
+unwinding, but it cannot influence a returned correlation result because the
+operation has failed. All transcript and Git operations remain read-only;
+active cancellation of in-flight work is not a milestone guarantee. Expected
+per-ref failures are aggregated fail-closed rather than treated as fatal, and
+do not cancel other refs because their aggregate coverage is still useful.
 
 ### Performance objective
 
-Safety preservation is the hard gate. After implementation, rerun a fresh
-approximately 400 MiB benchmark on a quiescent retained-history copy using the
-same target, machine, Node/Git versions, cache condition, and concurrency policy
-for baseline and new code.
-
-Record at least five warm-cache runs for each version and compare medians using
-the fixed telemetry below. The performance objective is at least a 20% reduction
-in median total correlation time, with the stage metrics explaining the change.
-This is an objective to validate the architecture, not permission to weaken a
-safety gate. If it is missed, record the result and revisit scan bytes/Git call
-architecture before changing confidence, coverage, or persistence.
+Safety preservation is the hard gate. The intended performance objective is at
+least a 20% reduction in median total correlation time, with fixed stage metrics
+explaining the change. For this milestone, the frozen comparable workload became
+unavailable when the local store changed from 291 files / 411,058,543 bytes to
+314 files / 441,430,099 bytes, and no substitute workload was used. Performance
+is therefore unmeasured/deferred, neither passed nor failed. This objective does
+not authorize weakening correctness or privacy; any future measurement must use
+comparable workload conditions before drawing a performance conclusion.
 
 The long-term interactive target remains `<2 seconds` for a typical warm local
 history. This milestone does not promise that a full on-demand 400 MiB scan can
@@ -738,8 +891,11 @@ Codex history and never use network access.
 ### P1 — controlled real positive
 
 1. Create a fresh private validation repository and dedicated Codex home.
-2. Start one actual Codex session on a supported surface/version that emits the
-   structured `apply_patch` call/result shape.
+2. Start one actual Codex 0.147.0 Legacy-history session and verify that its
+   quiescent rollout contains the exact supported self-contained durable
+   `event_msg / patch_apply_end` shape, with no persisted `patch_apply_begin` or
+   structured `apply_patch` request linked to it. A surrounding `exec` is
+   retained only as closed non-patch evidence.
 3. Apply one patch containing at least two distinctive invented lines in the
    queried target hunk.
 4. End/quiesce the session. From a non-Codex shell, verify no rollout writer is
@@ -757,8 +913,10 @@ limitation. Session-head equality is not required and is not the causal proof.
 
 1. Use a fresh P2 validation repository and dedicated Codex home containing
    exactly the two scenario sessions.
-2. Run two separate actual Codex sessions. Each must independently produce an
-   exactly linked, successful supported structured patch result.
+2. Run two separate actual Codex 0.147.0 Legacy-history sessions. Each must
+   independently produce a successful supported self-contained durable
+   `event_msg / patch_apply_end`; neither may depend on a persisted begin,
+   structured request, or surrounding `exec` for patch provenance.
 3. Session A adds at least two distinctive invented lines and session B adds at
    least two different distinctive invented lines. Both changes must survive in
    one final Git hunk containing the queried line.
@@ -780,7 +938,7 @@ candidates, and deliberately broken coverage do not satisfy P2.
 After observing P1/P2, the repository may retain only:
 
 - minimal sanitized synthetic JSONL fixtures reproducing the observed record
-  shapes and linkage;
+  shapes, explicit linkage where present, and closed terminal origin;
 - deliberately invented source/patch text needed by parser fixtures, or
   non-reversible fingerprints in correlation fixtures;
 - aggregate expected/actual status and coverage outcomes; and
@@ -799,6 +957,8 @@ original source session.
 - `src/agents/agent-history-source.ts`
   - add the typed summary/relevance scan, coverage, source-signature, and
     correlation-evidence projection contracts;
+  - add the closed patch `evidenceOrigins` representation and
+    `invalid-durable-patch-terminal` coverage reason;
   - make `scanSummaryAndRelevance` the authoritative staged source operation;
   - retain old read/extract methods only as temporary compatibility wrappers.
 - `src/agents/codex/parse-transcript.ts`
@@ -807,6 +967,8 @@ original source session.
   - preserve fail-closed diagnostics and complete effective-cwd tracking.
 - `src/agents/codex/extract-evidence.ts`
   - fold current patch/reference extraction into the one-pass scan visitor;
+  - normalize the two closed patch origins and deduplicate exact explicit patch
+    operation identities without treating `exec` as a patch call;
   - expose no raw payload after normalized fingerprints are derived;
   - project from the scan artifact without reopening the transcript.
 - `src/agents/codex/source.ts`
@@ -847,6 +1009,8 @@ original source session.
   - add `CandidateStrongPossibility` and the widened explicit coverage counts.
 - `src/correlation/build-candidates.ts`
   - distinguish incompatible, proven-not-strong, and cannot-prove states;
+  - count successful supported durable terminal operations in both closed
+    not-strong proofs exactly as specified above;
   - never turn uncertainty into ineligibility without a material limitation.
 - `src/correlation/correlate.ts`
   - apply uniqueness over the fully covered potentially-strong set while
@@ -877,6 +1041,85 @@ original source session.
 - a new validation runbook/report under `docs/validation/` records the P1/P2
   protocol and aggregate outcomes without source-session identifiers.
 
+#### Exact correction test matrix
+
+Implementation of this correction requires all of these cases; they are not
+optional examples:
+
+1. `test/codex-history.test.ts` parses an exact synthetic Codex 0.147.0
+   `event_msg / patch_apply_end` with nonempty `call_id`, nonempty `turn_id`,
+   `success: true`, `status: "completed"`, safe effective cwd, and update
+   `unified_diff`. With a preceding same-`call_id` `exec`, it emits one
+   authoritative `self-contained-durable-terminal` patch operation, no invented
+   patch attempt/link, at least two expected bounded distinctive fingerprints,
+   complete relevance coverage, and no `unlinked-patch-result` or
+   `unlinked-tool-result` diagnostic.
+2. The same terminal remains the same supported patch operation when the
+   `exec` is removed, moved after it, assigned another ID while the terminal ID
+   stays fixed, or separated by unrelated records. An `exec` alone and an
+   arbitrary `event_msg` never emit patch evidence.
+3. The terminal change matrix covers add/content, delete/content,
+   update/unified-diff, and update with absent, null, and safe string
+   `move_path`, asserting the same bounded fingerprints, numeric hunks,
+   normalized `path`/`movedFrom`, truncation behavior, and raw-payload
+   non-retention as the linked representation.
+4. The success matrix accepts only `true`/`completed` as successful and
+   classifies `false`/`failed` and `false`/`declined` as unsuccessful. Every
+   coherent complete unsuccessful case permits `no-successful-supported-patch`
+   when no other successful operation exists. Every missing, mistyped, unknown,
+   or inconsistent success/status combination adds
+   `invalid-durable-patch-terminal`, cannot become successful/strong, and
+   prevents both negative proofs.
+5. Missing or invalid `call_id`, `turn_id`, `changes`, effective cwd, change
+   path, change-operation discriminator, required content/diff, or non-null move
+   path; an identifier requiring truncation/normalization; a
+   partial/corrupt/truncated terminal; and an unsupported change shape each
+   produce the specified closed and existing specific coverage reasons. None is
+   downgraded to absence, disjointness, or a linked result.
+6. A valid successful terminal with `changes: {}` is supported, has zero change
+   fingerprints and zero direct overlap, prevents
+   `no-successful-supported-patch`, and yields
+   `successful-supported-patch-paths-disjoint` when all other coverage and
+   repository/context facts are complete.
+7. A valid successful nonempty self-contained terminal prevents
+   `no-successful-supported-patch`; complete safely normalized disjoint changes
+   permit `successful-supported-patch-paths-disjoint`; one target-related,
+   cwd-unknown, path-unknown, malformed, or incomplete change yields
+   `cannot-prove` instead.
+8. An exact per-ref operation-ID match between a structured `apply_patch`
+   representation and a durable terminal produces one logical operation, one
+   applied-change set, one evidence/signal sequence, and an `evidenceOrigins`
+   set containing both closed origins. The durable end owns terminal
+   success/changes and compatible request-side context is retained.
+9. Same-ID success/change/repository/path/hunk/fingerprint disagreement adds
+   limited relevance coverage and cannot yield `matched`. Different IDs with
+   identical content/path/time remain distinct. A same-ID `exec` neither joins
+   this merge nor invalidates the self-contained terminal.
+10. `test/correlation-decision-table.test.ts` runs the existing strong rows for
+    both authorized origins. A self-contained terminal becomes `strong` only
+    with successful supported target-hunk evidence, at least two distinctive
+    matching fingerprints, required repository/context compatibility, and no
+    active contradiction. One line, disjoint hunks, unsafe paths, incompatible
+    repositories, malformed data, and active divergence retain their current
+    outcomes and confidence bands.
+11. Deduplicated dual representation cannot create duplicate strong evidence or
+    ambiguity. Two genuinely distinct qualifying strong candidates still yield
+    `ambiguous`; session-head and time changes never alter either result.
+12. `test/correlation-e2e.test.ts` replaces the orphan expectation for this
+    exact durable shape with synthetic P1 and P2 equivalents: one standalone
+    terminal yields `matched` under complete coverage, two distinct qualifying
+    sessions yield `ambiguous`, and the Codex path still rereads no transcript.
+    A malformed exact terminal is classified
+    `invalid-durable-patch-terminal`, not linkage failure.
+13. `test/provenance-correlation-flow.test.ts` asserts proof/cap accounting uses
+    deduplicated logical operations: valid terminal success is potentially
+    strong unless disjointness is proved, malformed terminal uncertainty is not
+    pruned, the ref counts each logical operation once, and dual representation
+    does not change deterministic evidence ordering. An agent-neutral synthetic
+    linked-only result with missing/mismatched explicit linkage separately
+    asserts `unlinked-patch-result`, limited coverage, and `cannot-prove` so the
+    retained closed reason is not overloaded onto the Codex durable terminal.
+
 No production code is changed by this design document.
 
 ## Milestone acceptance criteria
@@ -895,8 +1138,10 @@ All must pass:
    `matched`.
 5. Observed file or namespace mutation adds material `changed-during-read` and
    blocks `matched`.
-6. Qualifying `strong` still requires supported successful structured patch
-   overlap with at least two distinctive lines and no active contradiction.
+6. Qualifying `strong` still requires a supported successful normalized
+   structured patch operation from either authorized origin, target-hunk
+   overlap with at least two distinctive lines, required repository/context
+   compatibility, and no active contradiction.
 7. Two strong candidates always return `ambiguous`; one strong returns
    `matched` only with complete coverage.
 8. Worker counts never exceed their injected limits, including nested path and
@@ -918,9 +1163,11 @@ All must pass:
 
 ### Controlled validation gates
 
-- P1 produces the required actual-source `matched` result with complete safe
-  coverage.
-- P2 produces the required actual two-strong-candidate `ambiguous` result with
+- P1 proves the exact Codex 0.147.0 self-contained durable terminal path can
+  produce the required actual-source `matched` result with complete safe
+  coverage and without chronological `exec` linkage.
+- P2 proves two exact Codex 0.147.0 self-contained durable terminal sessions can
+  produce the required actual two-strong-candidate `ambiguous` result with
   complete safe coverage and no cap-derived ambiguity.
 - Sanitized derived fixtures and the aggregate validation report are reviewed
   and accepted.
@@ -929,15 +1176,13 @@ All must pass:
 
 ### Performance evidence
 
-- Capture a fresh approximately 400 MiB baseline and post-change benchmark with
-  the fixed aggregate telemetry.
-- Report discovered refs, bytes, all queue/work/wall metrics, classification
-  counts, Git calls/process time, proof counts, projection counts/bytes, material
-  limitations, and total time.
-- Seek at least 20% lower median total time over five comparable warm runs.
-- Treat safety failures as release blockers. Treat a missed performance
-  objective as an architecture follow-up requiring explanation and measurement,
-  not as permission to lower a confidence or coverage gate.
+- The intended >=20% lower median total-time benchmark remains a performance
+  objective, not a correctness gate.
+- The frozen comparison was unavailable because the local store changed from
+  291 files / 411,058,543 bytes to 314 files / 441,430,099 bytes; no substitute
+  workload was used.
+- Performance is therefore unmeasured/deferred for this milestone, neither
+  passed nor failed. This does not authorize weakening correctness or privacy.
 
 ## Explicitly deferred
 
@@ -954,6 +1199,8 @@ All must pass:
   deleted-unmapped worktree controlled validation. These are the next corpus
   expansion after P1/P2 passes.
 - Additional Codex schema/surface claims beyond empirically supported variants.
+- Treating any other `event_msg`, terminal schema, or `exec` activity as patch
+  evidence without a separate empirical and protocol-backed design amendment.
 - Persistent or normal-output telemetry, remote telemetry, and free-form metric
   labels.
 - Semantic ancestry, split authorship, LLM/embedding matching, additional agent
@@ -965,8 +1212,8 @@ All must pass:
 Implement in this order: typed scan/coverage contracts; one-pass Codex scan;
 bounded scheduler and Git gate; invocation memoization; proof classification;
 coverage/scoring integration; fixed telemetry; synthetic tests; P1/P2 private
-validation; fresh 400 MiB benchmark.
+validation; record the milestone performance status.
 
 Do not begin a later deferred capability during this milestone. A completed
 handoff consists of the hard safety gates, accepted P1/P2 aggregate evidence,
-privacy review, and recorded benchmark—not a new causal feature claim.
+privacy review, and explicit performance status—not a new causal feature claim.

@@ -256,6 +256,10 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
   public readonly id = "synthetic";
   public discoverCalls = 0;
   public legacyDiscoverCalls = 0;
+  public scanCalls = 0;
+  public readonly scannedRefPaths: string[] = [];
+  public readonly scannedSessionIds: (string | null)[] = [];
+  public readonly scanTargets: (AgentEvidenceTarget | undefined)[] = [];
   public summaryCalls = 0;
   public extractionCalls = 0;
   public readonly discoveryContexts: AgentHistoryDiscoveryContext[] = [];
@@ -294,6 +298,60 @@ class SyntheticAgentHistorySource implements AgentHistorySource {
       availability: this.options.availability ?? "available",
       refs: [...this.summariesByPath.values()].map((value) => value.ref),
       diagnostics: this.options.diagnostics ?? [],
+    };
+  }
+
+  public async scanSummaryAndRelevance(
+    ref: AgentSessionRef,
+    target?: AgentEvidenceTarget,
+  ) {
+    this.scanCalls += 1;
+    this.scannedRefPaths.push(ref.sourcePath);
+    this.scanTargets.push(target);
+    if (this.options.throwOnSummary?.has(ref.sourcePath)) {
+      throw new Error("synthetic corrupt summary");
+    }
+    if (this.options.throwOnExtraction?.has(ref.sourcePath)) {
+      throw new Error("synthetic corrupt transcript");
+    }
+    const summaryValue = this.summariesByPath.get(ref.sourcePath);
+    assert.ok(summaryValue !== undefined);
+    const bundle = this.bundlesByPath.get(ref.sourcePath);
+    assert.ok(bundle !== undefined);
+    this.scannedSessionIds.push(bundle.session.sessionId);
+    const sessionValue = {
+      ...bundle.session,
+      diagnostics: [...summaryValue.diagnostics, ...bundle.diagnostics],
+    };
+    const relevanceReasons = bundle.diagnostics.flatMap((value) => {
+      switch (value.kind) {
+        case "changed-during-read": return ["changed-during-read" as const];
+        case "partial-final-record": return ["partial-record" as const];
+        case "corrupt-non-final-record": return ["corrupt-record" as const];
+        case "compacted-history":
+        case "context-compaction": return ["material-compaction" as const];
+        case "thread-rollback":
+        case "turn-aborted": return ["material-rollback-or-abort" as const];
+        default: return [] as const;
+      }
+    });
+    return {
+      ref,
+      summary: sessionValue,
+      correlationEvidence: {
+        evidence: bundle.evidence.filter((value) =>
+          value.kind === "patch-attempt"
+            || value.kind === "patch-result"
+            || value.kind === "git-revision-reference"),
+        unknownRecordCount: bundle.unknownRecordCount,
+      },
+      relevanceCoverage: {
+        status: relevanceReasons.length === 0 ? "complete" as const : "limited" as const,
+        reasons: relevanceReasons,
+      },
+      bytesRead: 0,
+      recordsSeen: 0,
+      sourceSignature: null,
     };
   }
 
@@ -514,7 +572,10 @@ async function analyzeWithSource(
 
 function assertNoTranscriptExecution(source: SyntheticAgentHistorySource): void {
   assert.equal(source.legacyDiscoverCalls, 0);
-  assert.equal(source.discoverCalls, 1);
+  assert.equal(source.discoverCalls, 2);
+  assert.equal(source.scanCalls, 1);
+  assert.equal(source.summaryCalls, 0);
+  assert.equal(source.extractionCalls, 0);
 }
 
 test("synthetic end-to-end selection is conservative and renderer-safe", async (t) => {
@@ -638,7 +699,7 @@ test("stale session-head context does not defeat an equivalent current structure
   assert.equal(report.correlation?.selected?.signals.some((value) => value.kind === "session-head-target-reference"), false);
 });
 
-test("an orphaned structured patch result cannot become strong, matched, or Likely", async (t) => {
+test("correction matrix 12: exact terminal-only P1 equivalent matches without exec provenance", async (t) => {
   const fixture = await targetFixture(t);
   const sessions = path.join(fixture.codexHome, "sessions", "2026", "08", "08");
   await mkdir(sessions, { recursive: true });
@@ -671,6 +732,7 @@ test("an orphaned structured patch result cannot become strong, matched, or Like
       payload: {
         type: "patch_apply_end",
         call_id: "call-non-patch",
+        turn_id: "turn-terminal-only",
         status: "completed",
         success: true,
         changes: {
@@ -695,13 +757,79 @@ test("an orphaned structured patch result cannot become strong, matched, or Like
     codexHome: fixture.codexHome,
   });
 
-  assert.equal(report.correlation?.status, "none");
-  assert.equal(report.correlation?.selected, undefined);
-  assert.equal(
-    (report.correlation?.alternatives ?? []).some((candidate) => candidate.band === "strong"),
-    false,
+  assert.equal(report.correlation?.status, "matched");
+  assert.equal(report.correlation?.selected?.session.sessionId, "luna-orphaned-patch");
+  assert.equal(report.correlation?.coverage.status, "complete");
+  assert.equal(report.correlation?.coverage.omittedPotentiallyStrongRefs, 0);
+  assert.doesNotMatch(renderText(report), /opaque command text/);
+});
+
+test("correction matrix 12: two independent terminal-only P2 equivalents are ambiguous", async (t) => {
+  const fixture = await targetFixture(t);
+  const sessions = path.join(fixture.codexHome, "sessions", "2026", "08", "08");
+  await mkdir(sessions, { recursive: true });
+  const patch = {
+    [path.join(fixture.directory, TARGET_PATH)]: {
+      type: "update",
+      unified_diff: [
+        "@@ -0,0 +1,2 @@",
+        `+${TARGET_FIRST}`,
+        `+${TARGET_SECOND}`,
+      ].join("\n"),
+    },
+  };
+  const records = (sessionId: string, callId: string, turnId: string) => [
+    {
+      timestamp: FIXED_START,
+      type: "session_meta",
+      payload: {
+        session_id: sessionId,
+        timestamp: FIXED_START,
+        cwd: fixture.directory,
+        git: { commit_hash: fixture.commit },
+      },
+    },
+    {
+      timestamp: FIXED_PATCH_TIME,
+      type: "event_msg",
+      payload: {
+        type: "patch_apply_end",
+        call_id: callId,
+        turn_id: turnId,
+        status: "completed",
+        success: true,
+        changes: patch,
+      },
+    },
+  ];
+  await writeFile(
+    path.join(sessions, "terminal-a.jsonl"),
+    `${records("terminal-a", "call-a", "turn-a").map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
   );
-  assert.doesNotMatch(renderText(report), /Likely related Codex session/);
+  const isolated = await analyzeLocation(`${TARGET_PATH}:2`, {
+    currentDirectory: fixture.directory,
+    git: fixture.strictRunner,
+    agentHistorySource: new CodexHistorySource(),
+    codexHome: fixture.codexHome,
+  });
+  assert.equal(isolated.correlation?.status, "matched");
+
+  await writeFile(
+    path.join(sessions, "terminal-b.jsonl"),
+    `${records("terminal-b", "call-b", "turn-b").map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
+  );
+  const combined = await analyzeLocation(`${TARGET_PATH}:2`, {
+    currentDirectory: fixture.directory,
+    git: fixture.strictRunner,
+    agentHistorySource: new CodexHistorySource(),
+    codexHome: fixture.codexHome,
+  });
+  assert.equal(combined.correlation?.status, "ambiguous");
+  assert.equal(combined.correlation?.alternatives.filter((candidate) => candidate.band === "strong").length, 2);
+  assert.equal(combined.correlation?.coverage.omittedPotentiallyStrongRefs, 0);
+  assert.equal(combined.correlation?.coverage.status, "complete");
 });
 
 test("privacy-sensitive synthetic transcript fields never reach terminal output or remote Git", async (t) => {
@@ -742,39 +870,31 @@ test("bounded discovery reads every summary, extracts at most 32 candidates, and
   });
   const bundles = summaries.map((value, index) => index === 0
     ? bundle(value, [{ id: "cap-matching-patch", lines: [TARGET_FIRST, TARGET_SECOND] }])
-    : emptyBundle(value));
+    : bundle(value, [{
+      id: `cap-unrelated-patch-${index}`,
+      lines: [TARGET_FIRST],
+    }]));
   const source = new SyntheticAgentHistorySource(summaries, bundles);
   const report = await analyzeWithSource(fixture, source);
   const expectedSummaryRefPaths = summaries.map((value) => value.ref.sourcePath);
   const expectedSummarySessionIds = summaries.map((value) => value.sessionId);
-  const summarizedRefPaths = new Set(source.summarizedRefPaths);
-  const summarizedSessionIds = new Set(source.summarizedSessionIds);
-  const extractedRefPaths = new Set(source.extractedRefPaths);
-  const extractedSessionIds = new Set(source.extractedSessionIds);
-  const omittedRefPaths = expectedSummaryRefPaths.filter((value) => !extractedRefPaths.has(value));
-  const omittedSessionIds = expectedSummarySessionIds.filter((value) => !extractedSessionIds.has(value));
+  const scannedRefPaths = new Set(source.scannedRefPaths);
+  const scannedSessionIds = new Set(source.scannedSessionIds);
 
-  assert.equal(source.discoverCalls, 1);
-  assert.equal(source.summaryCalls, 40);
-  assert.equal(source.extractionCalls, 32);
-  assert.equal(source.summarizedRefPaths.length, 40);
-  assert.equal(summarizedRefPaths.size, 40);
-  assert.deepEqual(summarizedRefPaths, new Set(expectedSummaryRefPaths));
-  assert.equal(source.summarizedSessionIds.length, 40);
-  assert.equal(summarizedSessionIds.size, 40);
-  assert.deepEqual(summarizedSessionIds, new Set(expectedSummarySessionIds));
-  assert.equal(source.extractedRefPaths.length, 32);
-  assert.equal(extractedRefPaths.size, 32);
-  assert.equal(source.extractedSessionIds.length, 32);
-  assert.equal(extractedSessionIds.size, 32);
-  assert.equal(omittedRefPaths.length, 8);
-  assert.equal(omittedSessionIds.length, 8);
-  assert.equal(omittedRefPaths.every((value) => !extractedRefPaths.has(value)), true);
-  assert.equal(omittedSessionIds.every((value) => !extractedSessionIds.has(value)), true);
+  assert.equal(source.discoverCalls, 2);
+  assert.equal(source.scanCalls, 40);
+  assert.equal(source.summaryCalls, 0);
+  assert.equal(source.extractionCalls, 0);
+  assert.equal(source.scannedRefPaths.length, 40);
+  assert.equal(scannedRefPaths.size, 40);
+  assert.deepEqual(scannedRefPaths, new Set(expectedSummaryRefPaths));
+  assert.equal(source.scannedSessionIds.length, 40);
+  assert.equal(scannedSessionIds.size, 40);
+  assert.deepEqual(scannedSessionIds, new Set(expectedSummarySessionIds));
   assert.equal(report.correlation?.coverage.discoveredRefs, 40);
-  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 40);
-  assert.equal(report.correlation?.coverage.fullyExtractedRefs, 32);
-  assert.equal(report.correlation?.coverage.omittedEligibleRefs, 8);
+  assert.equal(report.correlation?.coverage.usableSummaryRefs, 40);
+  assert.equal(report.correlation?.coverage.fullyProjectedRefs, 32);
+  assert.equal(report.correlation?.coverage.omittedPotentiallyStrongRefs, 8);
   assert.equal(report.correlation?.status, "none");
   assert.equal(report.correlation?.selected, undefined);
   assert.equal(report.correlation?.coverage.limitations.some((value) => value.kind === "candidate-cap" && value.material), true);
@@ -782,8 +902,8 @@ test("bounded discovery reads every summary, extracts at most 32 candidates, and
   assert.ok(retainedObserved !== undefined);
   assert.equal(retainedObserved.band, "strong");
   assert.equal(retainedObserved.signals.some((value) => value.kind === "structured-patch-overlap"), true);
-  assert.match(renderText(report), /Possible related session: luna-cap-00/);
-  assert.match(renderText(report), /insufficient to claim a match/);
+  assert.match(renderText(report), /No reliable Codex session match found/);
+  assert.match(renderText(report), /Coverage: limited/);
 });
 
 test("current, linked, and deleted worktree sessions correlate without repository leakage", async (t) => {
@@ -862,7 +982,9 @@ test("a known unrelated repository is excluded before full evidence extraction",
   );
   const report = await analyzeWithSource(fixture, source);
   assert.equal(report.correlation?.status, "none");
-  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 0);
+  assert.equal(report.correlation?.coverage.usableSummaryRefs, 1);
+  assert.equal(report.correlation?.coverage.incompatibleRefs, 1);
+  assert.equal(source.scanCalls, 1);
   assert.equal(source.extractionCalls, 0);
   assert.equal(report.correlation?.alternatives.length, 0);
 });

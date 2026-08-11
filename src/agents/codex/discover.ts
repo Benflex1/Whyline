@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { createHash } from "node:crypto";
 import { access, readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,44 @@ export interface CodexDiscoveryOptions {
 
 export interface CodexDiscoveryResult extends AgentHistoryDiscoveryResult {
   readonly home: string;
+}
+
+async function namespaceSignature(
+  home: string,
+  refs: readonly AgentSessionRef[],
+  availability: AgentHistoryDiscoveryResult["availability"],
+): Promise<string> {
+  const parts: string[] = [availability];
+  for (const store of ["sessions", "archived_sessions"] as const) {
+    const storePath = path.join(home, store);
+    try {
+      const metadata = await stat(storePath, { bigint: true });
+      parts.push(`${store}:directory:${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeNs}`);
+      try {
+        await access(storePath, constants.R_OK);
+        parts.push(`${store}:readable`);
+      } catch {
+        parts.push(`${store}:unreadable`);
+      }
+    } catch (error: unknown) {
+      parts.push(`${store}:${isMissing(error) ? "missing" : "unreadable"}`);
+    }
+  }
+  for (const ref of refs) {
+    try {
+      const metadata = await stat(ref.sourcePath, { bigint: true });
+      let readable = true;
+      try {
+        await access(ref.sourcePath, constants.R_OK);
+      } catch {
+        readable = false;
+      }
+      parts.push(`${ref.sourceKind}:${ref.sourcePath}:${readable ? "readable" : "unreadable"}:${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeNs}`);
+    } catch (error: unknown) {
+      parts.push(`${ref.sourceKind}:${ref.sourcePath}:${isMissing(error) ? "missing" : "unreadable"}`);
+    }
+  }
+  return createHash("sha256").update(parts.sort().join("\0"), "utf8").digest("hex");
 }
 
 export function resolveCodexHome(options: CodexDiscoveryOptions = {}): string {
@@ -98,18 +137,26 @@ export async function discoverCodexSources(
     }
   } catch {
     diagnostics.push(diagnostic("unreadable-transcript", undefined, "Codex home unavailable"));
-    return { home, availability: "unavailable", refs, diagnostics };
+    return {
+      home,
+      availability: "unavailable",
+      refs,
+      diagnostics,
+      namespaceSignature: await namespaceSignature(home, refs, "unavailable"),
+    };
   }
 
   const activeLimited = await collectJsonlFiles(path.join(home, "sessions"), "active", refs, diagnostics);
   const archivedLimited = await collectJsonlFiles(path.join(home, "archived_sessions"), "archived", refs, diagnostics);
   refs.sort((left, right) => left.sourcePath.localeCompare(right.sourcePath));
 
+  const availability = activeLimited || archivedLimited ? "limited" : "available";
   return {
     home,
-    availability: activeLimited || archivedLimited ? "limited" : "available",
+    availability,
     refs,
     diagnostics,
+    namespaceSignature: await namespaceSignature(home, refs, availability),
   };
 }
 

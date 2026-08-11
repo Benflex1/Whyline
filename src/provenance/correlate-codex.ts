@@ -68,6 +68,35 @@ interface SummaryCandidate {
   readonly possibility: CandidateStrongPossibility;
 }
 
+interface PreparedCodexCandidate {
+  readonly ref: AgentSessionRef;
+  readonly scan: AgentSummaryRelevanceScan;
+  readonly summary: AgentSessionSummary;
+  readonly repositoryMatch: CorrelationRepositoryMatch;
+  readonly pathMapping: HistoricalPathMapping | null;
+  readonly cwdlessResolution: HistoricalDirectoryResolution | null;
+  readonly coverageLimitations: readonly CorrelationLimitation[];
+  readonly pathClassificationComplete: boolean;
+}
+
+export interface PrepareCodexEvidenceOptions {
+  readonly repository: RepositoryContext;
+  readonly git: GitRunner;
+  readonly agentHistorySource?: AgentHistorySource;
+  readonly codexHome?: string;
+  readonly workLimits?: Partial<CorrelationWorkLimits>;
+}
+
+export interface PreparedCodexEvidence {
+  readonly source: AgentHistorySource;
+  readonly repository: RepositoryContext;
+  readonly discovery: AgentHistoryDiscoveryResult;
+  readonly candidates: readonly PreparedCodexCandidate[];
+  readonly coverageLimitations: readonly CorrelationLimitation[];
+  readonly git: InvocationGitRunner;
+  readonly limits: CorrelationWorkLimits;
+}
+
 export interface CorrelateCodexOptions {
   readonly target: CorrelationTarget;
   readonly location: ResolvedCodeLocation;
@@ -1309,4 +1338,307 @@ export async function correlateCodex(
   options: CorrelateCodexOptions,
 ): Promise<CorrelationResult> {
   return correlateCodexHardened(options);
+}
+
+function preparedWorkLimits(
+  discovery: AgentHistoryDiscoveryResult,
+  requested?: Partial<CorrelationWorkLimits>,
+): CorrelationWorkLimits {
+  const defaults = defaultCorrelationWorkLimits(discovery.refs.length);
+  return {
+    scanWorkers: requested?.scanWorkers ?? Math.max(1, defaults.scanWorkers),
+    gitProcessSlots: requested?.gitProcessSlots ?? Math.max(1, defaults.gitProcessSlots),
+    projectionWorkers: requested?.projectionWorkers ?? Math.max(1, defaults.projectionWorkers),
+  };
+}
+
+export async function prepareCodexEvidence(
+  options: PrepareCodexEvidenceOptions,
+): Promise<PreparedCodexEvidence> {
+  const discoveryContext: AgentHistoryDiscoveryContext | undefined = options.codexHome === undefined
+    ? undefined
+    : { historyRoot: options.codexHome };
+  const source = options.agentHistorySource
+    ?? new CodexHistorySource(options.codexHome === undefined ? {} : { codexHome: options.codexHome });
+  const discovery = await discover(source, discoveryContext);
+  const limits = preparedWorkLimits(discovery, options.workLimits);
+  const gate = new GitWorkGate(limits.gitProcessSlots);
+  const git = new InvocationGitRunner(options.git, gate);
+  const coverageLimitations = [...discoveryDiagnosticLimitations(discovery.diagnostics)];
+
+  if (discovery.availability === "unavailable") {
+    return {
+      source,
+      repository: options.repository,
+      discovery,
+      candidates: [],
+      coverageLimitations: [
+        limitation("discovery-unavailable", true),
+        ...coverageLimitations,
+      ],
+      git,
+      limits,
+    };
+  }
+  if (discovery.refs.length === 0 && discovery.availability === "available") {
+    coverageLimitations.push(limitation("empty-readable-store", false));
+  }
+  if (discovery.availability === "limited") {
+    coverageLimitations.push(limitation("discovery-limited", true));
+  }
+
+  const scanPool = new BoundedWorkPool(limits.scanWorkers);
+  const scanned = await scanPool.map(discovery.refs, async (ref) => {
+    try {
+      return await source.scanSummaryAndRelevance(ref);
+    } catch {
+      return fallbackScan(ref);
+    }
+  });
+
+  const closingDiscovery = await discover(source, discoveryContext);
+  if (discoveryNamespaceChanged(discovery, closingDiscovery)) {
+    coverageLimitations.push(limitation("changed-during-read", true));
+  }
+
+  const classifiedPool = new BoundedWorkPool(limits.gitProcessSlots);
+  const candidates = await classifiedPool.map(scanned, async (scan): Promise<PreparedCodexCandidate> => {
+    const summary = scan.summary;
+    const assessment = await classifyRepository(git, options.repository, summary);
+    return {
+      ref: scan.ref,
+      scan,
+      summary,
+      repositoryMatch: assessment.repositoryMatch,
+      pathMapping: assessment.pathMapping,
+      cwdlessResolution: assessment.cwdlessResolution,
+      coverageLimitations: [
+        ...diagnosticLimitations(summary.diagnostics),
+        ...scanLimitations(scan),
+      ],
+      pathClassificationComplete: scanPathClassificationIsComplete(
+        scan,
+        summary,
+        assessment.repositoryMatch,
+        assessment.pathMapping,
+      ),
+    };
+  });
+
+  return {
+    source,
+    repository: options.repository,
+    discovery,
+    candidates,
+    coverageLimitations,
+    git,
+    limits,
+  };
+}
+
+export async function projectPreparedCodex(
+  prepared: PreparedCodexEvidence,
+  target: CorrelationTarget,
+  _location: ResolvedCodeLocation,
+): Promise<CorrelationResult> {
+  if (prepared.discovery.availability === "unavailable") {
+    return correlate(target, [], {
+      status: "unavailable",
+      discoveredRefs: prepared.discovery.refs.length,
+      usableSummaryRefs: 0,
+      incompatibleRefs: 0,
+      provenNotStrongRefs: 0,
+      potentiallyStrongRefs: 0,
+      fullyProjectedRefs: 0,
+      omittedPotentiallyStrongRefs: 0,
+      limitations: prepared.coverageLimitations,
+    });
+  }
+
+  const staged = await Promise.all(prepared.candidates.map(async (candidate): Promise<SummaryCandidate> => {
+    const references = await resolveReferences(
+      prepared.git,
+      prepared.repository,
+      target,
+      summaryReferences(candidate.summary),
+    );
+    const possibility = classifyStrongPossibility({
+      repositoryMatch: candidate.repositoryMatch,
+      correlationEvidence: {
+        evidence: candidate.scan.correlationEvidence.evidence,
+        unknownRecordCount: candidate.scan.correlationEvidence.unknownRecordCount,
+      },
+      relevanceCoverage: candidate.scan.relevanceCoverage,
+      targetAliases: targetPathAliases(target),
+      pathClassificationComplete: candidate.pathClassificationComplete,
+    });
+    return {
+      ref: candidate.ref,
+      scan: candidate.scan,
+      summary: candidate.summary,
+      repositoryMatch: candidate.repositoryMatch,
+      pathMapping: candidate.pathMapping,
+      cwdlessResolution: candidate.cwdlessResolution,
+      references,
+      input: buildCandidateInput({
+        session: projectSessionSummary(candidate.summary),
+        evidence: null,
+        repositoryMatch: possibility.state === "excluded" ? "incompatible" : candidate.repositoryMatch,
+        references,
+        coverageLimitations: candidate.coverageLimitations,
+      }),
+      possibility,
+    };
+  }));
+
+  const ordered = [...staged].sort((left, right) => compareStagedCandidates(left, right, target));
+  const potentiallyStrong = ordered.filter((candidate) =>
+    candidate.input.eligible && candidate.possibility.state === "cannot-prove");
+  const selectedForProjection = potentiallyStrong.slice(0, MAX_FULL_EVIDENCE_CANDIDATES);
+  const inputs = new Map<string, CorrelationCandidateInput>(
+    staged.map((candidate) => [candidate.ref.sourcePath, candidate.input]),
+  );
+  const projectionPool = new BoundedWorkPool(prepared.limits.projectionWorkers);
+  const projectionOutcomes = await projectionPool.map(
+    selectedForProjection,
+    async (candidate): Promise<ProjectionOutcome> => {
+      const rawBundle = scanBundle(candidate.scan);
+      if (!hasPatchEvidence(candidate.scan)) {
+        return {
+          projected: true,
+          possibility: candidate.possibility,
+          input: buildCandidateInput({
+            session: projectSessionSummary(candidate.summary),
+            evidence: rawBundle,
+            repositoryMatch: candidate.repositoryMatch,
+            references: candidate.references,
+            coverageLimitations: candidate.input.coverageLimitations,
+          }),
+        };
+      }
+
+      const historicalAnchorPaths = candidate.repositoryMatch === "unknown"
+        && hasResolvedTargetAnchor(candidate.references)
+        ? targetPathAliases(target)
+        : null;
+      let projectedBundle: AgentEvidenceBundle | null = null;
+      let projectionLimitations: readonly CorrelationLimitation[] = [];
+      let projectionComplete = false;
+      try {
+        const projectedResult = await projectEvidenceBundle(
+          rawBundle,
+          prepared.repository,
+          prepared.git,
+          candidate.cwdlessResolution,
+          historicalAnchorPaths,
+        );
+        const originalChanges = rawBundle.evidence
+          .filter((value) => value.kind === "patch-result")
+          .flatMap((value) => value.patch?.changes ?? []);
+        const projectedChanges = projectedResult.bundle.evidence
+          .filter((value) => value.kind === "patch-result")
+          .flatMap((value) => value.patch?.changes ?? []);
+        const allChangesKnownIncompatible = originalChanges.length > 0
+          && projectedChanges.length === 0
+          && projectedResult.droppedIncompatibleChanges === originalChanges.length;
+        projectionComplete = !allChangesKnownIncompatible
+          && projectedChanges.length + projectedResult.droppedIncompatibleChanges
+            === originalChanges.length;
+        projectedBundle = projectedResult.bundle;
+        if (!projectionComplete && !allChangesKnownIncompatible) {
+          projectionLimitations = [limitation("summary-coverage", true)];
+        }
+      } catch {
+        projectionLimitations = [limitation("corrupt-transcript", true)];
+      }
+      if (projectedBundle === null) {
+        return {
+          projected: false,
+          possibility: candidate.possibility,
+          input: buildCandidateInput({
+            session: projectSessionSummary(candidate.summary),
+            evidence: null,
+            repositoryMatch: candidate.repositoryMatch,
+            references: candidate.references,
+            coverageLimitations: [...candidate.input.coverageLimitations, ...projectionLimitations],
+          }),
+        };
+      }
+      const possibility = classifyStrongPossibility({
+        repositoryMatch: candidate.repositoryMatch,
+        correlationEvidence: {
+          evidence: projectedBundle.evidence,
+          unknownRecordCount: candidate.scan.correlationEvidence.unknownRecordCount,
+        },
+        relevanceCoverage: candidate.scan.relevanceCoverage,
+        targetAliases: targetPathAliases(target),
+        pathClassificationComplete: projectionComplete,
+      });
+      return {
+        projected: true,
+        possibility,
+        input: buildCandidateInput({
+          session: projectSessionSummary(candidate.summary),
+          evidence: projectedBundle,
+          repositoryMatch: candidate.repositoryMatch,
+          references: candidate.references,
+          coverageLimitations: [...candidate.input.coverageLimitations, ...projectionLimitations],
+        }),
+      };
+    },
+  );
+
+  const projectedPossibilities = new Map<string, CandidateStrongPossibility>(
+    staged.map((candidate) => [candidate.ref.sourcePath, candidate.possibility]),
+  );
+  projectionOutcomes.forEach((value, ordinal) => {
+    const candidate = selectedForProjection[ordinal];
+    if (candidate !== undefined) {
+      inputs.set(candidate.ref.sourcePath, value.input);
+      projectedPossibilities.set(candidate.ref.sourcePath, value.possibility);
+    }
+  });
+
+  const finalLimitations = [...prepared.coverageLimitations];
+  const unsupportedSummaryCount = staged.filter((candidate) =>
+    candidate.input.coverageLimitations.some((value) => value.kind === "unsupported-summary")).length;
+  const unresolvedCount = staged.filter((candidate) =>
+    candidate.input.coverageLimitations.some((value) => value.kind === "unresolved-repository-candidate")).length;
+  if (unsupportedSummaryCount > 0) {
+    finalLimitations.push(limitation("unsupported-summary", true, unsupportedSummaryCount));
+  }
+  if (unresolvedCount > 0) {
+    finalLimitations.push(limitation("unresolved-repository-candidate", true, unresolvedCount));
+  }
+  const omittedPotentiallyStrongRefs = Math.max(
+    potentiallyStrong.length - selectedForProjection.length,
+    0,
+  );
+  if (omittedPotentiallyStrongRefs > 0) {
+    finalLimitations.push(limitation("candidate-cap", true, omittedPotentiallyStrongRefs));
+  }
+  const provenNotStrongRefs = staged.filter((candidate) =>
+    projectedPossibilities.get(candidate.ref.sourcePath)?.state === "proven-not-strong").length;
+  const incompatibleRefs = staged.filter((candidate) =>
+    projectedPossibilities.get(candidate.ref.sourcePath)?.state === "excluded").length;
+  const potentiallyStrongRefs = staged.filter((candidate) =>
+    candidate.input.eligible
+      && projectedPossibilities.get(candidate.ref.sourcePath)?.state === "cannot-prove").length;
+  const usableSummaryRefs = staged.filter((candidate) => candidate.summary.sessionId !== null).length;
+  const status = prepared.discovery.availability === "limited"
+    || finalLimitations.some((value) => value.material)
+    ? "limited" as const
+    : "complete" as const;
+
+  return correlate(target, [...inputs.values()], {
+    status,
+    discoveredRefs: prepared.discovery.refs.length,
+    usableSummaryRefs,
+    incompatibleRefs,
+    provenNotStrongRefs,
+    potentiallyStrongRefs,
+    fullyProjectedRefs: projectionOutcomes.filter((value) => value.projected).length,
+    omittedPotentiallyStrongRefs,
+    limitations: finalLimitations,
+  });
 }

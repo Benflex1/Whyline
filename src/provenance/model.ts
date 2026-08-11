@@ -34,6 +34,19 @@ export interface ResolvedCodeLocation extends CodeLocation {
   readonly targetDirty: boolean;
 }
 
+export interface ResolvedRangeCodeLocation {
+  readonly input: string;
+  readonly absolutePath: string;
+  readonly repositoryPath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly lineContents: readonly string[];
+  readonly lineDigests: readonly string[];
+  readonly fileSnapshot: FileSnapshot;
+  readonly targetState: TargetFileState;
+  readonly targetDirty: boolean;
+}
+
 export interface WorktreeInfo {
   readonly path: string;
   readonly headCommit: string | null;

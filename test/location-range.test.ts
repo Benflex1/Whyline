@@ -7,7 +7,11 @@ import test from "node:test";
 import { GitProcess } from "../src/git/git-process.js";
 import { discoverRepositoryContext } from "../src/git/repository-context.js";
 import { parseLocationQuery } from "../src/location/parse-location.js";
-import { resolveRangeLocation } from "../src/location/resolve-location.js";
+import {
+  resolveCurrentSource,
+  resolveRangeLocation,
+  resolvedRangeLocationFromSource,
+} from "../src/location/resolve-location.js";
 import { InvalidInputError } from "../src/whyline-error.js";
 
 test("parses an inclusive range query", () => {
@@ -126,4 +130,11 @@ test("resolves a range from one current UTF-8 file snapshot", async (t) => {
   assert.equal(resolved.targetState, "clean");
   assert.equal(resolved.targetDirty, false);
   assert.equal(resolved.fileSnapshot.digest.length, 64);
+
+  const source = await resolveCurrentSource(relativePath, repository, runner, directory);
+  const fromSameSource = resolvedRangeLocationFromSource(query, source);
+  assert.equal(source.text, "first\nümlaut\nthird\n");
+  assert.equal(fromSameSource.fileSnapshot.digest, resolved.fileSnapshot.digest);
+  assert.deepEqual(fromSameSource.lineContents, resolved.lineContents);
+  assert.equal(fromSameSource.repositoryPath, resolved.repositoryPath);
 });

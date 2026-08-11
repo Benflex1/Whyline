@@ -141,6 +141,7 @@ test("does not reinterpret unsupported declaration forms", async () => {
     "const nonFunction = 1;",
     "label: for (const value of []) { break label; }",
     "const classExpression = class { method() {} };",
+    "namespace Hidden { export function hidden() {} }",
   ].join("\n"));
   for (const selector of [
     "default",
@@ -162,6 +163,8 @@ test("does not reinterpret unsupported declaration forms", async () => {
     "label",
     "classExpression",
     "Example.method",
+    "hidden",
+    "Hidden.hidden",
   ]) {
     await assert.rejects(
       resolveTypeScriptSymbol(selector, file),

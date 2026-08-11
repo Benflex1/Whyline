@@ -98,10 +98,12 @@ function renderCorrelationGroup(
   return lines;
 }
 
-export function renderRangeDetails(report: WhylineRangeReport): string {
+export function renderRangeDetailsWithHeader(
+  report: WhylineRangeReport,
+  header: readonly string[],
+): string {
   const lines = [
-    sanitizeTerminalText(report.location.repositoryPath) + ":"
-      + report.location.startLine + "-" + report.location.endLine,
+    ...header,
     "",
     "State",
     "  range lines: " + String(report.location.endLine - report.location.startLine + 1),
@@ -161,4 +163,11 @@ export function renderRangeDetails(report: WhylineRangeReport): string {
   lines.push("  uncommitted groups: " + report.coverage.uncommittedGroups);
   lines.push("  Raw prompts, reasoning, commands, transcript paths, and patch payloads are omitted.");
   return lines.join("\n");
+}
+
+export function renderRangeDetails(report: WhylineRangeReport): string {
+  return renderRangeDetailsWithHeader(report, [
+    sanitizeTerminalText(report.location.repositoryPath) + ":"
+      + report.location.startLine + "-" + report.location.endLine,
+  ]);
 }

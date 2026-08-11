@@ -221,6 +221,7 @@ function collectCandidates(
 ): readonly Candidate[] {
   const candidates: Candidate[] = [];
   const visit = (node: ts.Node, enclosingNames: readonly string[]): void => {
+    if (typescript.isModuleDeclaration(node) || typescript.isClassExpression(node)) return;
     const candidate = candidateForNode(typescript, sourceFile, node, enclosingNames);
     if (candidate !== undefined) candidates.push(candidate);
     const nextNames = candidate === undefined

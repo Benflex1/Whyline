@@ -7,6 +7,7 @@ import { currentLocationSnapshot, resolveLocation, snapshotsEqual } from "../loc
 import { parseLocation } from "../location/parse-location.js";
 import type { AgentHistorySource } from "../agents/agent-history-source.js";
 import { correlateCodex } from "./correlate-codex.js";
+import type { CorrelationTelemetry } from "./correlation-telemetry.js";
 import { buildCorrelationTarget } from "./build-correlation-target.js";
 import type {
   GitProvenance,
@@ -24,6 +25,7 @@ export interface AnalyzeLocationOptions {
   readonly hooks?: AnalysisHooks;
   readonly agentHistorySource?: AgentHistorySource;
   readonly codexHome?: string;
+  readonly correlationTelemetry?: CorrelationTelemetry;
 }
 
 function baseLimitations(): string[] {
@@ -155,6 +157,7 @@ export async function analyzeLocation(
         git: runner,
         ...(options.agentHistorySource === undefined ? {} : { agentHistorySource: options.agentHistorySource }),
         ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
+        ...(options.correlationTelemetry === undefined ? {} : { telemetry: options.correlationTelemetry }),
       });
     }
   }

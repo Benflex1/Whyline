@@ -101,8 +101,8 @@ function sufficientCoverage(
   coverage: CorrelationCoverage,
 ): boolean {
   if (coverage.status !== "complete") return false;
-  if (coverage.omittedEligibleRefs > 0) return false;
-  if (coverage.fullyExtractedRefs < coverage.summaryEligibleRefs) return false;
+  if (coverage.omittedPotentiallyStrongRefs > 0) return false;
+  if (coverage.fullyProjectedRefs < coverage.potentiallyStrongRefs) return false;
   if (coverage.limitations.some((limitation) => limitation.material)) return false;
   if (target.relevantHunks.some((hunk) => hunk.truncated)) return false;
   return candidates.every((candidate) =>

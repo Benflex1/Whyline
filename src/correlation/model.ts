@@ -98,11 +98,39 @@ export interface CorrelationLimitation {
 export interface CorrelationCoverage {
   readonly status: "complete" | "limited" | "unavailable";
   readonly discoveredRefs: number;
-  readonly summaryEligibleRefs: number;
-  readonly fullyExtractedRefs: number;
-  readonly omittedEligibleRefs: number;
+  readonly usableSummaryRefs: number;
+  readonly incompatibleRefs: number;
+  readonly provenNotStrongRefs: number;
+  readonly potentiallyStrongRefs: number;
+  readonly fullyProjectedRefs: number;
+  readonly omittedPotentiallyStrongRefs: number;
   readonly limitations: readonly CorrelationLimitation[];
 }
+
+export type ProvenNotStrongReason =
+  | "no-successful-supported-patch"
+  | "successful-supported-patch-paths-disjoint";
+
+export type CannotProveReason =
+  | "potentially-relevant-supported-patch"
+  | "repository-identity-unknown"
+  | "path-classification-unknown"
+  | "relevance-coverage-limited"
+  | "payload-or-hunk-inconclusive";
+
+export type CandidateStrongPossibility =
+  | {
+    readonly state: "excluded";
+    readonly reason: "repository-incompatible";
+  }
+  | {
+    readonly state: "proven-not-strong";
+    readonly reason: ProvenNotStrongReason;
+  }
+  | {
+    readonly state: "cannot-prove";
+    readonly reasons: readonly CannotProveReason[];
+  };
 
 export interface ResolvedCommitReference {
   readonly kind: AgentCommitReferenceKind;

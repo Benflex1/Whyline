@@ -14,7 +14,9 @@ import {
   extractCodexEvidence,
   parseTranscript,
   readCodexSummary,
+  scanCodexSummaryAndRelevance,
 } from "../src/agents/codex/index.js";
+import { classifyStrongPossibility } from "../src/correlation/build-candidates.js";
 import { isDistinctiveLine } from "../src/agents/codex/safe.js";
 
 const fixtureRoot = path.resolve(process.cwd(), "test/fixtures/codex");
@@ -86,6 +88,47 @@ function eventRecord(payload: Record<string, unknown>, timestamp = "2026-08-08T0
 
 function evidenceOf(bundle: Awaited<ReturnType<typeof extractCodexEvidence>>, kind: AgentEvidence["kind"]): AgentEvidence[] {
   return bundle.evidence.filter((item) => item.kind === kind);
+}
+
+function durableTerminalPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: "patch_apply_end",
+    call_id: "durable-call",
+    turn_id: "durable-turn",
+    success: true,
+    status: "completed",
+    changes: {
+      "/home/alice/projects/example/src/target.ts": {
+        type: "update",
+        unified_diff: "@@ -1,0 +1,2 @@\n+const durableFirst = true;\n+const durableSecond = false;\n",
+      },
+    },
+    ...overrides,
+  };
+}
+
+function durableTerminalRecords(
+  terminalOverrides: Record<string, unknown> = {},
+  extraRecords: readonly Record<string, unknown>[] = [],
+  metaOverrides: Record<string, unknown> = {},
+): readonly Record<string, unknown>[] {
+  return [
+    metaRecord(metaOverrides),
+    ...extraRecords,
+    eventRecord(durableTerminalPayload(terminalOverrides)),
+  ];
+}
+
+function classifyScan(
+  scan: Awaited<ReturnType<typeof scanCodexSummaryAndRelevance>>,
+  targetAliases: readonly string[] = ["src/target.ts"],
+) {
+  return classifyStrongPossibility({
+    repositoryMatch: "current-worktree",
+    correlationEvidence: scan.correlationEvidence,
+    relevanceCoverage: scan.relevanceCoverage,
+    targetAliases: new Set(targetAliases),
+  });
 }
 
 test("discovery is recursive, metadata-only, filename-independent, and archive-optional", async (t) => {
@@ -272,7 +315,7 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);
 });
 
-test("unlinked patch completion retains structured audit evidence without result linkage", async (t) => {
+test("malformed terminal with exec is limited durable evidence, never exec provenance", async (t) => {
   const directory = await temporaryDirectory(t);
   const sourcePath = await writeTranscript(directory, "unlinked-patch-result.jsonl", [
     metaRecord(),
@@ -306,7 +349,9 @@ test("unlinked patch completion retains structured audit evidence without result
   assert.equal(result?.resultRecorded, false);
   assert.equal(result?.reportedSuccess, true);
   assert.equal(result?.patch?.changes[0]?.payloadRecovered, true);
-  assert.ok(bundle.diagnostics.some((item) => item.kind === "unlinked-tool-result"));
+  assert.equal(bundle.diagnostics.some((item) => item.kind === "unlinked-tool-result"), false);
+  const scan = await scanCodexSummaryAndRelevance(refFor(sourcePath));
+  assert.ok(scan.relevanceCoverage.reasons.includes("invalid-durable-patch-terminal"));
 });
 
 test("failed patch and update/add/delete change payloads remain separate from success", async (t) => {
@@ -666,4 +711,359 @@ test("agent source exposes only the staged discovery, summary, and evidence oper
   assert.deepEqual(diagnosticDiscovery.diagnostics, []);
   assert.equal((await source.readSummary(refs[0]!)).sessionId, "example-session");
   assert.equal((await source.extractEvidence(refs[0]!)).session.sessionId, "example-session");
+});
+
+test("authoritative summary-and-relevance scan returns stable accounting and normalized evidence", async (t) => {
+  const ref = await fixtureRef(t, "rollout-t3-v0.147.0.jsonl");
+  const source = new CodexHistorySource();
+  const scan = await source.scanSummaryAndRelevance(ref, {
+    repositoryPath: "src/example.ts",
+    worktreeRoot: "/home/alice/projects/example",
+  });
+
+  assert.equal(scan.summary.sessionId, "example-t3-session");
+  assert.equal(scan.correlationEvidence.evidence.some((item) => item.kind === "patch-result"), true);
+  assert.equal(scan.correlationEvidence.evidence.some((item) => item.kind === "command-attempt"), false);
+  assert.ok(scan.bytesRead > 0);
+  assert.ok(scan.recordsSeen > 0);
+  assert.ok(scan.sourceSignature !== null);
+  assert.equal(scan.sourceSignature?.size, scan.bytesRead);
+  assert.equal(scan.relevanceCoverage.status, "limited");
+  assert.ok(scan.relevanceCoverage.reasons.includes("material-compaction"));
+  const serialized = JSON.stringify(scan, (_key, value: unknown) =>
+    typeof value === "bigint" ? value.toString() : value);
+  assert.doesNotMatch(serialized, /synthetic patch output|synthetic tool output|repository_url/);
+});
+
+test("stable Codex scan artifacts are reused without a transcript reread", async (t) => {
+  const ref = await fixtureRef(t, "rollout-t3-v0.147.0.jsonl");
+  const source = new CodexHistorySource();
+  const first = await source.scanSummaryAndRelevance(ref);
+  const second = await source.scanSummaryAndRelevance(ref);
+
+  assert.equal(second, first);
+  assert.equal(second.sourceSignature?.size, first.bytesRead);
+});
+
+test("discovery namespace signature detects rollout creation and removal", async (t) => {
+  const home = await temporaryDirectory(t);
+  const sessions = path.join(home, "sessions", "2026", "08", "09");
+  await mkdir(sessions, { recursive: true });
+  const first = path.join(sessions, "first.jsonl");
+  const second = path.join(sessions, "second.jsonl");
+  await copyFile(fixturePath("rollout-cli-v0.142.5.jsonl"), first);
+
+  const opening = await discoverCodexSources({ codexHome: home });
+  await copyFile(fixturePath("rollout-t3-v0.147.0.jsonl"), second);
+  const afterCreation = await discoverCodexSources({ codexHome: home });
+  await rm(first);
+  const afterRemoval = await discoverCodexSources({ codexHome: home });
+
+  assert.notEqual(opening.namespaceSignature, afterCreation.namespaceSignature);
+  assert.notEqual(afterCreation.namespaceSignature, afterRemoval.namespaceSignature);
+});
+
+test("correction matrix 1: exact durable terminal is authoritative without a patch request", async (t) => {
+  const ref = await fixtureRef(t, "rollout-durable-terminal-v0.147.0.jsonl");
+  const bundle = await extractCodexEvidence(ref);
+  const scan = await scanCodexSummaryAndRelevance(ref);
+  const attempts = evidenceOf(bundle, "patch-attempt");
+  const results = evidenceOf(bundle, "patch-result");
+
+  assert.equal(attempts.length, 0);
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.resultRecorded, true);
+  assert.deepEqual(results[0]?.patch?.evidenceOrigins, ["self-contained-durable-terminal"]);
+  assert.equal(results[0]?.patch?.changes.length, 1);
+  assert.equal(results[0]?.patch?.changes[0]?.distinctiveLineFingerprints.length, 2);
+  assert.equal(scan.relevanceCoverage.status, "complete");
+  assert.equal(scan.relevanceCoverage.reasons.length, 0);
+  assert.equal(bundle.diagnostics.some((item) => item.kind === "unlinked-tool-result"), false);
+  assert.doesNotMatch(JSON.stringify(bundle), /synthetic command omitted|durableFirst|durableSecond/);
+});
+
+test("correction matrix 2: terminal support is invariant under exec placement and unrelated records", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const exec = responseRecord({
+    type: "custom_tool_call",
+    id: "exec-item",
+    call_id: "durable-call",
+    name: "exec",
+    input: "[synthetic command omitted]",
+  });
+  const unrelated = eventRecord({ type: "task_started", turn_id: "durable-turn" });
+  const variants: readonly (readonly Record<string, unknown>[])[] = [
+    durableTerminalRecords({}, [exec]),
+    durableTerminalRecords(),
+    [metaRecord(), eventRecord(durableTerminalPayload()), exec],
+    durableTerminalRecords({}, [
+      responseRecord({
+        type: "custom_tool_call",
+        id: "exec-item",
+        call_id: "another-exec-call",
+        name: "exec",
+        input: "[synthetic command omitted]",
+      }),
+      unrelated,
+    ]),
+  ];
+
+  const expectedFingerprints: string[][] = [];
+  for (const [index, records] of variants.entries()) {
+    const sourcePath = await writeTranscript(directory, `variant-${index}.jsonl`, records);
+    const bundle = await extractCodexEvidence(refFor(sourcePath));
+    const results = evidenceOf(bundle, "patch-result");
+    assert.equal(results.length, 1, `variant ${index}`);
+    assert.equal(evidenceOf(bundle, "patch-attempt").length, 0, `variant ${index}`);
+    assert.equal(results[0]?.resultRecorded, true, `variant ${index}`);
+    expectedFingerprints.push([...(results[0]?.patch?.changes[0]?.distinctiveLineFingerprints ?? [])]);
+  }
+  assert.ok(expectedFingerprints.every((value) => value.length === 2));
+  assert.ok(expectedFingerprints.every((value) => value.join(",") === expectedFingerprints[0]?.join(",")));
+
+  const execOnly = await writeTranscript(directory, "exec-only.jsonl", [metaRecord(), exec]);
+  const arbitraryEvent = await writeTranscript(directory, "arbitrary-event.jsonl", [
+    metaRecord(),
+    eventRecord({ type: "agent_message", message: "[synthetic message omitted]" }),
+  ]);
+  const paddedTerminal = await writeTranscript(directory, "padded-terminal.jsonl", [
+    metaRecord(),
+    eventRecord({ ...durableTerminalPayload(), type: " patch_apply_end " }),
+  ]);
+  assert.equal(evidenceOf(await extractCodexEvidence(refFor(execOnly)), "patch-result").length, 0);
+  assert.equal(evidenceOf(await extractCodexEvidence(refFor(arbitraryEvent)), "patch-result").length, 0);
+  assert.equal(evidenceOf(await extractCodexEvidence(refFor(paddedTerminal)), "patch-result").length, 0);
+});
+
+test("correction matrix 3: terminal add/delete/update/move normalization matches linked evidence", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const changes = {
+    "/home/alice/projects/example/src/add.ts": {
+      type: "add",
+      content: "const durableAddFirst = true;\nconst durableAddSecond = false;\n",
+    },
+    "/home/alice/projects/example/src/delete.ts": {
+      type: "delete",
+      content: "const durableDeleteFirst = true;\nconst durableDeleteSecond = false;\n",
+    },
+    "/home/alice/projects/example/src/update.ts": {
+      type: "update",
+      unified_diff: "@@ -10,2 +20,4 @@\n-old\n+const durableUpdateFirst = true;\n+const durableUpdateSecond = false;\n",
+    },
+    "/home/alice/projects/example/src/moved-none.ts": {
+      type: "update",
+      move_path: null,
+      unified_diff: "@@ -1 +1 @@\n+const durableMoveNone = true;\n",
+    },
+    "/home/alice/projects/example/src/moved-absent.ts": {
+      type: "update",
+      unified_diff: "@@ -1 +1 @@\n+const durableMoveAbsent = true;\n",
+    },
+    "/home/alice/projects/example/src/moved-safe.ts": {
+      type: "update",
+      move_path: "src/moved-safe-new.ts",
+      unified_diff: "@@ -1 +1 @@\n+const durableMoveSafe = true;\n",
+    },
+  };
+  const sourcePath = await writeTranscript(directory, "change-matrix.jsonl", [
+    ...durableTerminalRecords({ changes }),
+  ]);
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const result = evidenceOf(bundle, "patch-result")[0];
+  assert.equal(result?.patch?.changes.length, 6);
+  assert.deepEqual(result?.patch?.changes.map((change) => change.changeType), [
+    "add", "delete", "update", "update", "update", "update",
+  ]);
+  assert.equal(result?.patch?.changes[0]?.path, "src/add.ts");
+  assert.equal(result?.patch?.changes[1]?.matchSide, "deleted");
+  assert.deepEqual(result?.patch?.changes[2]?.hunkRanges, [{ oldStart: 10, oldLines: 2, newStart: 20, newLines: 4 }]);
+  assert.equal(result?.patch?.changes[3]?.movedFrom, undefined);
+  assert.equal(result?.patch?.changes[4]?.movedFrom, undefined);
+  assert.equal(result?.patch?.changes[5]?.movedFrom, "src/moved-safe-new.ts");
+  assert.ok(result?.patch?.changes.every((change) => change.payloadFingerprint.length === 64));
+  assert.doesNotMatch(JSON.stringify(bundle), /durableAddFirst|durableDeleteFirst|durableUpdateFirst|durableMoveSafe/);
+
+  const oversized = `const durableTruncatedFirst = true;\nconst durableTruncatedSecond = false;\n${"const retained = true;\n".repeat(20_000)}`;
+  const truncatedPath = await writeTranscript(directory, "truncated-terminal.jsonl", durableTerminalRecords({
+    changes: {
+      "/home/alice/projects/example/src/truncated.ts": { type: "add", content: oversized },
+    },
+  }));
+  const truncated = await extractCodexEvidence(refFor(truncatedPath));
+  const truncatedResult = evidenceOf(truncated, "patch-result")[0];
+  assert.equal(truncatedResult?.patch?.changes[0]?.payloadTruncated, true);
+  assert.ok((await scanCodexSummaryAndRelevance(refFor(truncatedPath))).relevanceCoverage.reasons.includes("invalid-durable-patch-terminal"));
+});
+
+test("correction matrix 4: only coherent success/status pairs are classified", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const cases: readonly {
+    readonly name: string;
+    readonly overrides: Record<string, unknown>;
+    readonly expectedProof: "none" | "disjoint" | "cannot";
+  }[] = [
+    { name: "success", overrides: { success: true, status: "completed" }, expectedProof: "cannot" },
+    { name: "failed", overrides: { success: false, status: "failed" }, expectedProof: "none" },
+    { name: "declined", overrides: { success: false, status: "declined" }, expectedProof: "none" },
+    { name: "missing-success", overrides: { success: undefined, status: "completed" }, expectedProof: "cannot" },
+    { name: "mistyped-success", overrides: { success: "true", status: "completed" }, expectedProof: "cannot" },
+    { name: "unknown-status", overrides: { success: true, status: "applied" }, expectedProof: "cannot" },
+    { name: "inconsistent", overrides: { success: false, status: "completed" }, expectedProof: "cannot" },
+  ];
+  for (const row of cases) {
+    const sourcePath = await writeTranscript(directory, `${row.name}.jsonl`, durableTerminalRecords(row.overrides));
+    const scan = await scanCodexSummaryAndRelevance(refFor(sourcePath));
+    const result = evidenceOf(await extractCodexEvidence(refFor(sourcePath)), "patch-result")[0];
+    const possibility = classifyScan(scan);
+    if (row.expectedProof === "none") {
+      assert.deepEqual(possibility, { state: "proven-not-strong", reason: "no-successful-supported-patch" }, row.name);
+    } else {
+      assert.equal(possibility.state, row.expectedProof === "cannot" ? "cannot-prove" : "proven-not-strong", row.name);
+    }
+    const expectedReportedSuccess = typeof row.overrides.success === "boolean"
+      ? row.overrides.success
+      : undefined;
+    assert.equal(result?.reportedSuccess, expectedReportedSuccess, row.name);
+    if (row.expectedProof === "cannot" && row.name !== "success") {
+      assert.ok(scan.relevanceCoverage.reasons.includes("invalid-durable-patch-terminal"), row.name);
+    }
+  }
+});
+
+test("correction matrix 5: malformed durable terminals fail closed with their closed coverage reason", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const cases: readonly {
+    readonly name: string;
+    readonly terminal: Record<string, unknown>;
+    readonly meta?: Record<string, unknown>;
+    readonly expectedSpecific?: string;
+  }[] = [
+    { name: "missing-call-id", terminal: { call_id: undefined } },
+    { name: "invalid-turn-id", terminal: { turn_id: "   " } },
+    { name: "missing-changes", terminal: { changes: undefined } },
+    { name: "unsafe-path", terminal: { changes: { "../unsafe.ts": { type: "add", content: "x" } } } },
+    { name: "unsupported-operation", terminal: { changes: { "/home/alice/projects/example/src/bad.ts": { type: "rename", content: "x" } } } },
+    { name: "missing-content", terminal: { changes: { "/home/alice/projects/example/src/bad.ts": { type: "add" } } } },
+    { name: "non-null-invalid-move", terminal: { changes: { "/home/alice/projects/example/src/bad.ts": { type: "update", move_path: 42, unified_diff: "@@\n+bad\n" } } } },
+    { name: "overlong-call-id", terminal: { call_id: "x".repeat(257) } },
+    { name: "missing-cwd", terminal: {}, meta: { cwd: undefined }, expectedSpecific: "missing-effective-cwd" },
+  ];
+  for (const row of cases) {
+    const sourcePath = await writeTranscript(directory, `${row.name}.jsonl`, durableTerminalRecords(row.terminal, [], row.meta));
+    const scan = await scanCodexSummaryAndRelevance(refFor(sourcePath));
+    assert.equal(scan.relevanceCoverage.status, "limited", row.name);
+    assert.ok(scan.relevanceCoverage.reasons.includes("invalid-durable-patch-terminal"), row.name);
+    if (row.expectedSpecific !== undefined) {
+      assert.ok(scan.relevanceCoverage.reasons.includes(row.expectedSpecific as never), row.name);
+    }
+    assert.equal(classifyScan(scan).state, "cannot-prove", row.name);
+  }
+
+  const partialPath = await writeTranscript(
+    directory,
+    "partial-terminal.jsonl",
+    [metaRecord()],
+    "{\"timestamp\":\"2026-08-09T01:00:02.000Z\",\"type\":\"event_msg\",\"payload\":",
+  );
+  const partial = await scanCodexSummaryAndRelevance(refFor(partialPath));
+  assert.ok(partial.relevanceCoverage.reasons.includes("partial-record"));
+  assert.equal(classifyScan(partial).state, "cannot-prove");
+});
+
+test("correction matrix 6: an empty completed terminal is supported but only proves disjointness", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const sourcePath = await writeTranscript(directory, "empty-terminal.jsonl", durableTerminalRecords({ changes: {} }));
+  const scan = await scanCodexSummaryAndRelevance(refFor(sourcePath));
+  const result = evidenceOf(await extractCodexEvidence(refFor(sourcePath)), "patch-result")[0];
+  assert.equal(result?.reportedSuccess, true);
+  assert.equal(result?.patch?.changes.length, 0);
+  assert.equal(scan.relevanceCoverage.status, "complete");
+  assert.deepEqual(classifyScan(scan), {
+    state: "proven-not-strong",
+    reason: "successful-supported-patch-paths-disjoint",
+  });
+});
+
+test("correction matrix 7: nonempty terminal proofs retain all uncertainty boundaries", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const disjointPath = await writeTranscript(directory, "disjoint-terminal.jsonl", durableTerminalRecords({
+    changes: { "/home/alice/projects/example/src/other.ts": { type: "add", content: "const disjointFirst = true;\nconst disjointSecond = false;\n" } },
+  }));
+  const targetPath = await writeTranscript(directory, "target-terminal.jsonl", durableTerminalRecords());
+  const noCwdPath = await writeTranscript(directory, "cwd-unknown-terminal.jsonl", durableTerminalRecords({}, [], { cwd: undefined }));
+
+  assert.deepEqual(classifyScan(await scanCodexSummaryAndRelevance(refFor(disjointPath))), {
+    state: "proven-not-strong",
+    reason: "successful-supported-patch-paths-disjoint",
+  });
+  assert.deepEqual(classifyScan(await scanCodexSummaryAndRelevance(refFor(targetPath))), {
+    state: "cannot-prove",
+    reasons: ["potentially-relevant-supported-patch"],
+  });
+  assert.equal(classifyScan(await scanCodexSummaryAndRelevance(refFor(noCwdPath))).state, "cannot-prove");
+});
+
+test("correction matrix 8: compatible linked and durable representations deduplicate by exact operation ID", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const sourcePath = await writeTranscript(directory, "deduplicated-terminal.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "linked-patch-item",
+      call_id: "shared-patch-call",
+      name: "apply_patch",
+      input: "*** Begin Patch\n*** Update File: src/target.ts\n*** End Patch",
+    }),
+    eventRecord(durableTerminalPayload({ call_id: "shared-patch-call" })),
+  ]);
+  const bundle = await extractCodexEvidence(refFor(sourcePath));
+  const results = evidenceOf(bundle, "patch-result");
+  assert.equal(evidenceOf(bundle, "patch-attempt").length, 1);
+  assert.equal(results.length, 1);
+  assert.deepEqual(results[0]?.patch?.evidenceOrigins, ["linked-request-result", "self-contained-durable-terminal"]);
+  assert.equal(results[0]?.reportedSuccess, true);
+  assert.equal(results[0]?.patch?.changes[0]?.distinctiveLineFingerprints.length, 2);
+});
+
+test("correction matrix 9: duplicate conflicts are limited and unrelated IDs stay distinct", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const conflictPath = await writeTranscript(directory, "conflicting-terminal.jsonl", [
+    metaRecord(),
+    responseRecord({
+      type: "custom_tool_call",
+      id: "linked-patch-item",
+      call_id: "shared-patch-call",
+      name: "apply_patch",
+      input: "*** Begin Patch\n*** Update File: src/target.ts\n*** End Patch",
+    }),
+    eventRecord(durableTerminalPayload({ call_id: "shared-patch-call" })),
+    eventRecord(durableTerminalPayload({
+      call_id: "shared-patch-call",
+      turn_id: "different-turn",
+      changes: { "/home/alice/projects/example/src/other.ts": { type: "add", content: "const conflict = true;\n" } },
+    })),
+  ]);
+  const conflictScan = await scanCodexSummaryAndRelevance(refFor(conflictPath));
+  assert.equal(conflictScan.relevanceCoverage.status, "limited");
+  assert.equal(classifyScan(conflictScan).state, "cannot-prove");
+
+  const distinctPath = await writeTranscript(directory, "distinct-terminal-ids.jsonl", [
+    metaRecord(),
+    eventRecord(durableTerminalPayload({ call_id: "first-call" })),
+    eventRecord(durableTerminalPayload({ call_id: "second-call" })),
+  ]);
+  const distinct = await extractCodexEvidence(refFor(distinctPath));
+  assert.equal(evidenceOf(distinct, "patch-result").length, 2);
+  const execSameIdPath = await writeTranscript(directory, "exec-same-id-terminal.jsonl", durableTerminalRecords({}, [
+    responseRecord({
+      type: "custom_tool_call",
+      id: "exec-item",
+      call_id: "durable-call",
+      name: "exec",
+      input: "[synthetic command omitted]",
+    }),
+  ]));
+  const execSameIdScan = await scanCodexSummaryAndRelevance(refFor(execSameIdPath));
+  assert.equal(execSameIdScan.relevanceCoverage.status, "complete");
+  assert.equal(evidenceOf(await extractCodexEvidence(refFor(execSameIdPath)), "patch-result").length, 1);
 });

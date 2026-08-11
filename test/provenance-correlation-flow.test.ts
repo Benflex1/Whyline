@@ -6,7 +6,9 @@ import path from "node:path";
 import test from "node:test";
 
 import type {
+  AgentCorrelationEvidenceProjection,
   AgentDiagnostic,
+  AgentEvidence,
   AgentEvidenceBundle,
   AgentHistoryAvailability,
   AgentHistoryDiscoveryContext,
@@ -17,8 +19,10 @@ import type {
   AgentSessionSummary,
 } from "../src/agents/agent-history-source.js";
 import { CodexHistorySource } from "../src/agents/codex/source.js";
+import { classifyStrongPossibility } from "../src/correlation/build-candidates.js";
 import { GitProcess } from "../src/git/git-process.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
+import { CorrelationTelemetry, FIXED_METRIC_NAMES } from "../src/provenance/correlation-telemetry.js";
 import type { WhylineReport } from "../src/provenance/model.js";
 
 function digestLine(line: string): string {
@@ -157,15 +161,6 @@ function evidence(
   };
 }
 
-function emptyEvidenceBundle(session: AgentSessionSummary): AgentEvidenceBundle {
-  return {
-    session,
-    evidence: [],
-    unknownRecordCount: 0,
-    diagnostics: [],
-  };
-}
-
 function evidenceWithoutCwd(bundle: AgentEvidenceBundle): AgentEvidenceBundle {
   return {
     ...bundle,
@@ -265,6 +260,10 @@ interface FakeAgentHistoryOptions {
 class FakeAgentHistorySource implements AgentHistorySource {
   public readonly id = "fake";
   public discoverCalls = 0;
+  public scanCalls = 0;
+  public scannedRefPaths: string[] = [];
+  public scannedSessionIds: (string | null)[] = [];
+  public scanTargets: (AgentEvidenceTarget | undefined)[] = [];
   public discoveryContexts: AgentHistoryDiscoveryContext[] = [];
   public summaryCalls = 0;
   public extractionCalls = 0;
@@ -296,6 +295,54 @@ class FakeAgentHistorySource implements AgentHistorySource {
       availability: this.options.availability ?? "available",
       refs: this.summaries.map((value) => value.ref),
       diagnostics: this.options.diagnostics ?? [],
+    };
+  }
+
+  public async scanSummaryAndRelevance(
+    ref: AgentSessionRef,
+    target?: AgentEvidenceTarget,
+  ) {
+    this.scanCalls += 1;
+    const summaryValue = this.summaries.find((summaryValue) => summaryValue.ref.sourcePath === ref.sourcePath);
+    assert.ok(summaryValue !== undefined);
+    const bundle = this.bundles.get(ref.sourcePath);
+    assert.ok(bundle !== undefined);
+    this.scannedRefPaths.push(ref.sourcePath);
+    this.scannedSessionIds.push(bundle.session.sessionId);
+    this.scanTargets.push(target);
+    const sessionValue = {
+      ...bundle.session,
+      diagnostics: [...summaryValue.diagnostics, ...bundle.diagnostics],
+    };
+    const relevanceReasons = bundle.diagnostics.flatMap((value) => {
+      switch (value.kind) {
+        case "changed-during-read": return ["changed-during-read" as const];
+        case "partial-final-record": return ["partial-record" as const];
+        case "corrupt-non-final-record": return ["corrupt-record" as const];
+        case "compacted-history":
+        case "context-compaction": return ["material-compaction" as const];
+        case "thread-rollback":
+        case "turn-aborted": return ["material-rollback-or-abort" as const];
+        default: return [] as const;
+      }
+    });
+    return {
+      ref,
+      summary: sessionValue,
+      correlationEvidence: {
+        evidence: bundle.evidence.filter((value) =>
+          value.kind === "patch-attempt"
+            || value.kind === "patch-result"
+            || value.kind === "git-revision-reference"),
+        unknownRecordCount: bundle.unknownRecordCount,
+      },
+      relevanceCoverage: {
+        status: relevanceReasons.length === 0 ? "complete" as const : "limited" as const,
+        reasons: relevanceReasons,
+      },
+      bytesRead: 0,
+      recordsSeen: 0,
+      sourceSignature: null,
     };
   }
 
@@ -379,11 +426,13 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   const session = summary(ref, f.directory, commit);
   const source = new FakeAgentHistorySource(session, evidence(session, [firstLine, secondLine]));
   const syntheticHome = path.join(f.directory, "synthetic-home");
+  const telemetry = new CorrelationTelemetry();
   const report: WhylineReport = await analyzeLocation("src-target.ts:2", {
     currentDirectory: f.directory,
     git: f.runner,
     agentHistorySource: source,
     codexHome: syntheticHome,
+    correlationTelemetry: telemetry,
   });
 
   assert.equal(report.provenance.state, "committed");
@@ -391,15 +440,16 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.session.sessionId, "synthetic-session");
   assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
-  assert.equal(source.summaryCalls, 1);
-  assert.equal(source.extractionCalls, 1);
-  assert.deepEqual(source.discoveryContexts, [{ historyRoot: syntheticHome }]);
-  assert.deepEqual(source.extractionTargets, [{
+  assert.equal(source.scanCalls, 1);
+  assert.equal(source.summaryCalls, 0);
+  assert.equal(source.extractionCalls, 0);
+  assert.deepEqual(source.discoveryContexts, [{ historyRoot: syntheticHome }, { historyRoot: syntheticHome }]);
+  assert.deepEqual(source.scanTargets, [{
     repositoryPath: "src-target.ts",
     line: 2,
     worktreeRoot: f.directory,
   }]);
-  const targetHint = source.extractionTargets[0];
+  const targetHint = source.scanTargets[0];
   assert.ok(targetHint !== undefined);
   assert.equal("commit" in targetHint, false);
   assert.equal("relevantHunks" in targetHint, false);
@@ -407,6 +457,13 @@ test("committed provenance passes a narrow target hint and normalized correlatio
   const serializedCorrelation = JSON.stringify(report.correlation);
   assert.equal(serializedCorrelation.includes(f.directory), false);
   assert.equal(serializedCorrelation.includes("synthetic-home"), false);
+  const snapshot = telemetry.snapshot();
+  assert.deepEqual(Object.keys(snapshot).sort(), [...FIXED_METRIC_NAMES].sort());
+  assert.equal(Object.values(snapshot).every((value) => typeof value === "number"), true);
+  assert.equal(snapshot["whyline.correlation.potentially_strong"], 1);
+  assert.equal(snapshot["whyline.correlation.full_evidence.candidates"], 1);
+  assert.equal(JSON.stringify(snapshot).includes(f.directory), false);
+  assert.equal(JSON.stringify(snapshot).includes("synthetic-home"), false);
 });
 
 test("real Codex adapter preserves deleted historical cwd for a cwd-less patch result", async (t) => {
@@ -532,7 +589,8 @@ test("real Codex adapter attributes a cwd-less patch to the later nested reposit
 
   assert.equal(report.correlation?.status, "none");
   assert.equal(report.correlation?.selected, undefined);
-  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 0);
+  assert.equal(report.correlation?.coverage.usableSummaryRefs, 1);
+  assert.equal(report.correlation?.coverage.incompatibleRefs, 0);
 });
 
 test("real Codex adapter keeps a cwd-less patch eligible across a linked worktree", async (t) => {
@@ -714,9 +772,11 @@ test("existing nested repository common Git directory overrides worktree contain
     codexHome: path.join(f.directory, "synthetic-home"),
   });
 
+  assert.equal(source.scanCalls, 1);
   assert.equal(source.extractionCalls, 0);
   assert.equal(report.correlation?.status, "none");
-  assert.equal(report.correlation?.coverage.summaryEligibleRefs, 0);
+  assert.equal(report.correlation?.coverage.usableSummaryRefs, 1);
+  assert.equal(report.correlation?.coverage.incompatibleRefs, 1);
 });
 
 test("a deleted prunable linked worktree remains a linked repository match", async (t) => {
@@ -858,7 +918,7 @@ test("candidate cap and unresolved repository candidates remain visible in cover
   });
   const bundles = summaries.map((value, index) => index === 0
     ? evidence(value, [firstLine, secondLine])
-    : emptyEvidenceBundle(value));
+    : evidence(value, [firstLine]));
   const cappedSource = new FakeAgentHistorySource(summaries, bundles);
   const cappedReport = await analyzeLocation("src-target.ts:2", {
     currentDirectory: f.directory,
@@ -867,9 +927,10 @@ test("candidate cap and unresolved repository candidates remain visible in cover
     codexHome: path.join(f.directory, "synthetic-home"),
   });
 
-  assert.equal(cappedSource.extractionCalls, 32);
+  assert.equal(cappedSource.scanCalls, 33);
+  assert.equal(cappedSource.extractionCalls, 0);
   assert.equal(cappedReport.correlation?.status, "none");
-  assert.equal(cappedReport.correlation?.coverage.omittedEligibleRefs, 1);
+  assert.equal(cappedReport.correlation?.coverage.omittedPotentiallyStrongRefs, 1);
   assert.equal(cappedReport.correlation?.coverage.limitations.some((value) => value.kind === "candidate-cap" && value.material), true);
 
   const matchingRef = reference(f, "matching");
@@ -891,7 +952,8 @@ test("candidate cap and unresolved repository candidates remain visible in cover
     codexHome: path.join(f.directory, "synthetic-home"),
   });
 
-  assert.equal(unresolvedSource.extractionCalls, 1);
+  assert.equal(unresolvedSource.scanCalls, 2);
+  assert.equal(unresolvedSource.extractionCalls, 0);
   assert.equal(unresolvedReport.correlation?.status, "none");
   assert.equal(unresolvedReport.correlation?.coverage.limitations.some((value) => value.kind === "unresolved-repository-candidate" && value.material), true);
 });
@@ -1002,7 +1064,7 @@ test("full evidence cwd missing or unresolvable retains unknown conservative beh
 
   assert.equal(report.correlation?.status, "none");
   assert.equal(report.correlation?.selected, undefined);
-  assert.equal(report.correlation?.coverage.status, "complete");
+  assert.equal(report.correlation?.coverage.status, "limited");
 });
 
 test("unknown historical cwd with a resolved session-head projects only an exact target patch path", async (t) => {
@@ -1052,6 +1114,7 @@ test("unknown historical cwd with a resolved session-head projects only an exact
   });
 
   assert.equal(noAnchorReport.correlation?.status, "none");
+  assert.equal(noAnchorSource.scanCalls, 1);
   assert.equal(noAnchorSource.extractionCalls, 0);
   assert.equal(
     noAnchorReport.correlation?.coverage.limitations.some((value) =>
@@ -1118,7 +1181,8 @@ test("an incompatible nested-repository distinctive patch cannot make a candidat
 
   assert.equal(report.correlation?.status, "none");
   assert.equal(report.correlation?.selected, undefined);
-  assert.equal(source.extractionCalls, 1);
+  assert.equal(source.scanCalls, 1);
+  assert.equal(source.extractionCalls, 0);
   assert.equal(report.correlation?.alternatives.length, 0);
 });
 
@@ -1292,4 +1356,72 @@ test("cwd-less evidence remains valid across linked worktrees sharing the common
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
   assert.equal(report.correlation?.coverage.status, "complete");
+});
+
+test("correction matrix 13: proof and cap inputs count deduplicated logical operations conservatively", async (t) => {
+  const f = await fixture(t);
+  await writeFile(path.join(f.directory, "src-target.ts"), "const terminalTarget = true;\n", "utf8");
+  const commit = await commitTarget(f);
+  const ref = reference(f, "terminal-proof");
+  const sessionValue = summary(ref, f.directory, commit, { sessionId: "terminal-proof" });
+  const validBundle = evidence(sessionValue, [
+    "const terminalProofFirst = true;",
+    "const terminalProofSecond = false;",
+  ]);
+  const validEvidence = validBundle.evidence[0]!;
+  const terminalEvidence: AgentEvidence = {
+    ...validEvidence,
+    patch: {
+      ...validEvidence.patch!,
+      evidenceOrigins: ["self-contained-durable-terminal"],
+    },
+  };
+  const terminalProjection: AgentCorrelationEvidenceProjection = {
+    evidence: [terminalEvidence],
+    unknownRecordCount: 0,
+  };
+  const potentiallyStrong = classifyStrongPossibility({
+    repositoryMatch: "current-worktree",
+    correlationEvidence: terminalProjection,
+    relevanceCoverage: { status: "complete", reasons: [] },
+    targetAliases: new Set(["src-target.ts"]),
+  });
+  assert.equal(potentiallyStrong.state, "cannot-prove");
+  assert.equal(terminalProjection.evidence.length, 1);
+  assert.deepEqual(terminalEvidence.patch?.evidenceOrigins, ["self-contained-durable-terminal"]);
+
+  const malformed = classifyStrongPossibility({
+    repositoryMatch: "current-worktree",
+    correlationEvidence: terminalProjection,
+    relevanceCoverage: { status: "limited", reasons: ["invalid-durable-patch-terminal"] },
+    targetAliases: new Set(["src-target.ts"]),
+  });
+  assert.equal(malformed.state, "cannot-prove");
+
+  const unlinkedOnly = classifyStrongPossibility({
+    repositoryMatch: "current-worktree",
+    correlationEvidence: terminalProjection,
+    relevanceCoverage: { status: "limited", reasons: ["unlinked-patch-result"] },
+    targetAliases: new Set(["src-target.ts"]),
+  });
+  assert.equal(unlinkedOnly.state, "cannot-prove");
+
+  const cappedSummaries = Array.from({ length: 33 }, (_, index) => {
+    const cappedRef = reference(f, `terminal-cap-${index.toString().padStart(2, "0")}`);
+    return summary(cappedRef, f.directory, commit, { sessionId: `terminal-cap-${index.toString().padStart(2, "0")}` });
+  });
+  const cappedBundles = cappedSummaries.map((cappedSession) => ({
+    ...validBundle,
+    session: cappedSession,
+    evidence: [{ ...terminalEvidence, id: `${cappedSession.sessionId}-evidence` }],
+  }));
+  const cappedSource = new FakeAgentHistorySource(cappedSummaries, cappedBundles);
+  const cappedReport = await analyzeLocation("src-target.ts:1", {
+    currentDirectory: f.directory,
+    git: f.runner,
+    agentHistorySource: cappedSource,
+    codexHome: path.join(f.directory, "synthetic-home"),
+  });
+  assert.equal(cappedReport.correlation?.coverage.omittedPotentiallyStrongRefs, 1);
+  assert.equal(cappedReport.correlation?.coverage.limitations.some((value) => value.kind === "candidate-cap" && value.material), true);
 });

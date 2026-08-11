@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type {
+  AgentCorrelationEvidenceProjection,
   AgentEvidence,
   AgentEvidenceBundle,
+  AgentRelevanceCoverage,
   AgentPatchChange,
   AgentSessionSummary,
 } from "../src/agents/agent-history-source.js";
@@ -16,7 +18,7 @@ import type {
   CorrelationTarget,
   ResolvedCommitReference,
 } from "../src/correlation/model.js";
-import { buildCandidateInput } from "../src/correlation/build-candidates.js";
+import { buildCandidateInput, classifyStrongPossibility } from "../src/correlation/build-candidates.js";
 import { correlate } from "../src/correlation/correlate.js";
 import { scoreCandidate } from "../src/correlation/score-candidate.js";
 
@@ -166,9 +168,12 @@ function coverage(overrides: Partial<CorrelationCoverage> = {}): CorrelationCove
   return {
     status: "complete",
     discoveredRefs: 1,
-    summaryEligibleRefs: 1,
-    fullyExtractedRefs: 1,
-    omittedEligibleRefs: 0,
+    usableSummaryRefs: 1,
+    incompatibleRefs: 0,
+    provenNotStrongRefs: 0,
+    potentiallyStrongRefs: 1,
+    fullyProjectedRefs: 1,
+    omittedPotentiallyStrongRefs: 0,
     limitations: [],
     ...overrides,
   };
@@ -177,6 +182,62 @@ function coverage(overrides: Partial<CorrelationCoverage> = {}): CorrelationCove
 function scored(overrides: Partial<CorrelationCandidateInput> = {}): CorrelationCandidate {
   return scoreCandidate(target(), input(overrides));
 }
+
+function scan(
+  evidence: readonly AgentEvidence[],
+  coverage: AgentRelevanceCoverage = { status: "complete", reasons: [] },
+): {
+  readonly correlationEvidence: AgentCorrelationEvidenceProjection;
+  readonly relevanceCoverage: AgentRelevanceCoverage;
+} {
+  return {
+    correlationEvidence: { evidence, unknownRecordCount: 0 },
+    relevanceCoverage: coverage,
+  };
+}
+
+test("strong possibility has only the frozen positive proofs", () => {
+  assert.deepEqual(
+    classifyStrongPossibility({
+      repositoryMatch: "current-worktree",
+      ...scan([]),
+      targetAliases: new Set([targetPath]),
+    }),
+    { state: "proven-not-strong", reason: "no-successful-supported-patch" },
+  );
+  assert.deepEqual(
+    classifyStrongPossibility({
+      repositoryMatch: "current-worktree",
+      ...scan(evidenceBundle([patchEvidence([patchChange({ path: otherPath })])]).evidence),
+      targetAliases: new Set([targetPath]),
+    }),
+    { state: "proven-not-strong", reason: "successful-supported-patch-paths-disjoint" },
+  );
+  assert.equal(
+    classifyStrongPossibility({
+      repositoryMatch: "current-worktree",
+      ...scan([], { status: "limited", reasons: ["material-compaction"] }),
+      targetAliases: new Set([targetPath]),
+    }).state,
+    "cannot-prove",
+  );
+  assert.equal(
+    classifyStrongPossibility({
+      repositoryMatch: "current-worktree",
+      ...scan(evidenceBundle().evidence),
+      targetAliases: new Set([targetPath]),
+    }).state,
+    "cannot-prove",
+  );
+  assert.deepEqual(
+    classifyStrongPossibility({
+      repositoryMatch: "incompatible",
+      ...scan([]),
+      targetAliases: new Set([targetPath]),
+    }),
+    { state: "excluded", reason: "repository-incompatible" },
+  );
+});
 
 test("eligibility table excludes incompatible and unanchored unknown candidates", () => {
   const cases: readonly {
@@ -482,7 +543,7 @@ test("truncated target coverage remains material when no candidates are scored",
   const result = correlate(
     target({ relevantHunks: [hunk({ truncated: true })] }),
     [],
-    coverage({ discoveredRefs: 0, summaryEligibleRefs: 0, fullyExtractedRefs: 0 }),
+    coverage({ discoveredRefs: 0, usableSummaryRefs: 0, potentiallyStrongRefs: 0, fullyProjectedRefs: 0 }),
   );
 
   assert.equal(result.status, "none");
@@ -537,13 +598,13 @@ test("operation and coverage table gates direct overlap and final selection", ()
     readonly selected?: string;
   }[] = [
     { name: "one strong complete", inputs: [strong], coverage: coverage(), status: "matched", selected: "strong" },
-    { name: "two strong", inputs: [strong, input({ session: session({ sessionId: "strong-2" }) })], coverage: coverage({ discoveredRefs: 2, summaryEligibleRefs: 2, fullyExtractedRefs: 2 }), status: "ambiguous" },
-    { name: "strong plus plausible", inputs: [strong, plausible], coverage: coverage({ discoveredRefs: 2, summaryEligibleRefs: 2, fullyExtractedRefs: 2 }), status: "matched", selected: "strong" },
-    { name: "two plausible", inputs: [plausible, input({ session: session({ sessionId: "plausible-2" }), evidence: plausible.evidence })], coverage: coverage({ discoveredRefs: 2, summaryEligibleRefs: 2, fullyExtractedRefs: 2 }), status: "none" },
-    { name: "strong omitted candidate", inputs: [strong], coverage: coverage({ omittedEligibleRefs: 1, limitations: [{ kind: "candidate-cap", material: true, count: 1 }] }), status: "none" },
+    { name: "two strong", inputs: [strong, input({ session: session({ sessionId: "strong-2" }) })], coverage: coverage({ discoveredRefs: 2, usableSummaryRefs: 2, potentiallyStrongRefs: 2, fullyProjectedRefs: 2 }), status: "ambiguous" },
+    { name: "strong plus plausible", inputs: [strong, plausible], coverage: coverage({ discoveredRefs: 2, usableSummaryRefs: 2, potentiallyStrongRefs: 2, fullyProjectedRefs: 2 }), status: "matched", selected: "strong" },
+    { name: "two plausible", inputs: [plausible, input({ session: session({ sessionId: "plausible-2" }), evidence: plausible.evidence })], coverage: coverage({ discoveredRefs: 2, usableSummaryRefs: 2, potentiallyStrongRefs: 2, fullyProjectedRefs: 2 }), status: "none" },
+    { name: "strong omitted candidate", inputs: [strong], coverage: coverage({ omittedPotentiallyStrongRefs: 1, limitations: [{ kind: "candidate-cap", material: true, count: 1 }] }), status: "none" },
     { name: "truncated relevant Git hunk", inputs: [strong], coverage: coverage(), status: "none" },
-    { name: "empty readable store", inputs: [], coverage: coverage({ discoveredRefs: 0, summaryEligibleRefs: 0, fullyExtractedRefs: 0, limitations: [{ kind: "empty-readable-store", material: false }] }), status: "none" },
-    { name: "explicit unavailable source", inputs: [], coverage: coverage({ status: "unavailable", discoveredRefs: 0, summaryEligibleRefs: 0, fullyExtractedRefs: 0, limitations: [{ kind: "discovery-unavailable", material: true }] }), status: "unavailable" },
+    { name: "empty readable store", inputs: [], coverage: coverage({ discoveredRefs: 0, usableSummaryRefs: 0, potentiallyStrongRefs: 0, fullyProjectedRefs: 0, limitations: [{ kind: "empty-readable-store", material: false }] }), status: "none" },
+    { name: "explicit unavailable source", inputs: [], coverage: coverage({ status: "unavailable", discoveredRefs: 0, usableSummaryRefs: 0, potentiallyStrongRefs: 0, fullyProjectedRefs: 0, limitations: [{ kind: "discovery-unavailable", material: true }] }), status: "unavailable" },
   ];
 
   for (const row of finalCases) {
@@ -559,6 +620,55 @@ test("operation and coverage table gates direct overlap and final selection", ()
       assert.equal(result.selected, undefined, row.name);
     }
   }
+});
+
+test("correction matrix 10: self-contained durable origin keeps the existing strong threshold", () => {
+  const linked = patchEvidence();
+  const terminal: AgentEvidence = {
+    ...linked,
+    id: "terminal-evidence",
+    patch: {
+      ...linked.patch!,
+      evidenceOrigins: ["self-contained-durable-terminal"],
+    },
+  };
+  const strong = scored({ evidence: evidenceBundle([terminal]) });
+  assert.equal(strong.band, "strong");
+  assert.equal(strong.signals.some((signal) => signal.kind === "structured-patch-overlap"), true);
+
+  const oneLine = scored({
+    evidence: evidenceBundle([{
+      ...terminal,
+      patch: {
+        ...terminal.patch!,
+        changes: [patchChange({ distinctiveLineFingerprints: ["line-a"], matchLineFingerprints: ["line-a"] })],
+      },
+    }]),
+  });
+  assert.notEqual(oneLine.band, "strong");
+
+  const disjoint = scored({
+    evidence: evidenceBundle([{
+      ...terminal,
+      patch: {
+        ...terminal.patch!,
+        changes: [patchChange({ path: otherPath })],
+      },
+    }]),
+  });
+  assert.notEqual(disjoint.band, "strong");
+});
+
+test("correction matrix 11: deduplication cannot manufacture ambiguity, while two real strong refs remain ambiguous", () => {
+  const first = input({ session: session({ sessionId: "terminal-a", startedAt: "2026-08-01T00:00:00.000Z" }) });
+  const second = input({ session: session({ sessionId: "terminal-b", startedAt: "2026-08-09T00:00:00.000Z" }) });
+  const result = correlate(
+    target(),
+    [first, second],
+    coverage({ discoveredRefs: 2, usableSummaryRefs: 2, potentiallyStrongRefs: 2, fullyProjectedRefs: 2 }),
+  );
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.alternatives.filter((candidate) => candidate.band === "strong").length, 2);
 });
 
 test("ineligible material limitations remain global coverage blockers", () => {
@@ -579,7 +689,7 @@ test("ineligible material limitations remain global coverage blockers", () => {
   const result = correlate(
     target(),
     [strong, unresolved, unsupported],
-    coverage({ discoveredRefs: 3, summaryEligibleRefs: 1, fullyExtractedRefs: 1 }),
+    coverage({ discoveredRefs: 3, usableSummaryRefs: 1, potentiallyStrongRefs: 1, fullyProjectedRefs: 1 }),
   );
 
   assert.equal(result.status, "none");

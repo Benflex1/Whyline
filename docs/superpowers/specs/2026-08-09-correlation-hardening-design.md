@@ -24,9 +24,13 @@ does the work beneath that contract.
 5. The first controlled real corpus contains only P1 and P2: one actual
    positive and one actual two-strong-candidate ambiguity. P3-P6 follow only
    after P1/P2 establish the primary path.
-6. Preservation of safety semantics is the hard gate. A fresh approximately
-   400 MiB benchmark and material latency improvement are required evidence,
-   but `<2 seconds` is not a correctness or milestone gate.
+6. Preservation of safety and correctness semantics remains the hard gate. The
+   intended >=20% benchmark remains a performance objective. The frozen
+   comparable workload became unavailable when the local store changed from
+   291 files / 411,058,543 bytes to 314 files / 441,430,099 bytes; no substitute
+   workload was used. Performance is therefore unmeasured/deferred for this
+   milestone, neither passed nor failed. This does not authorize weakening
+   correctness or privacy. `<2 seconds` is not a correctness or milestone gate.
 7. A Codex `event_msg / patch_apply_end` in the exact durable 0.147.0 shape may
    be a self-contained supported patch operation without a persisted
    `patch_apply_begin` or `apply_patch` request. This is a closed schema
@@ -689,26 +693,24 @@ Expected source failures are normalized and analysis continues conservatively:
 
 An internal pool invariant failure, inability to create the bounded scheduler,
 or loss of the process boundary is an operational failure and aborts the
-correlation operation. It is not silently converted into a complete `none`.
-
-After a fatal abort, queued work is not started. In-flight read streams are
-closed and in-flight Git processes receive the shared abort signal. Expected
-per-ref failures do not cancel other refs because their aggregate coverage is
-still useful.
+correlation operation. It is not silently converted into a complete `none` or
+`matched`. Already-started or queued read-only work may finish during failure
+unwinding, but it cannot influence a returned correlation result because the
+operation has failed. All transcript and Git operations remain read-only;
+active cancellation of in-flight work is not a milestone guarantee. Expected
+per-ref failures are aggregated fail-closed rather than treated as fatal, and
+do not cancel other refs because their aggregate coverage is still useful.
 
 ### Performance objective
 
-Safety preservation is the hard gate. After implementation, rerun a fresh
-approximately 400 MiB benchmark on a quiescent retained-history copy using the
-same target, machine, Node/Git versions, cache condition, and concurrency policy
-for baseline and new code.
-
-Record at least five warm-cache runs for each version and compare medians using
-the fixed telemetry below. The performance objective is at least a 20% reduction
-in median total correlation time, with the stage metrics explaining the change.
-This is an objective to validate the architecture, not permission to weaken a
-safety gate. If it is missed, record the result and revisit scan bytes/Git call
-architecture before changing confidence, coverage, or persistence.
+Safety preservation is the hard gate. The intended performance objective is at
+least a 20% reduction in median total correlation time, with fixed stage metrics
+explaining the change. For this milestone, the frozen comparable workload became
+unavailable when the local store changed from 291 files / 411,058,543 bytes to
+314 files / 441,430,099 bytes, and no substitute workload was used. Performance
+is therefore unmeasured/deferred, neither passed nor failed. This objective does
+not authorize weakening correctness or privacy; any future measurement must use
+comparable workload conditions before drawing a performance conclusion.
 
 The long-term interactive target remains `<2 seconds` for a typical warm local
 history. This milestone does not promise that a full on-demand 400 MiB scan can
@@ -1174,15 +1176,13 @@ All must pass:
 
 ### Performance evidence
 
-- Capture a fresh approximately 400 MiB baseline and post-change benchmark with
-  the fixed aggregate telemetry.
-- Report discovered refs, bytes, all queue/work/wall metrics, classification
-  counts, Git calls/process time, proof counts, projection counts/bytes, material
-  limitations, and total time.
-- Seek at least 20% lower median total time over five comparable warm runs.
-- Treat safety failures as release blockers. Treat a missed performance
-  objective as an architecture follow-up requiring explanation and measurement,
-  not as permission to lower a confidence or coverage gate.
+- The intended >=20% lower median total-time benchmark remains a performance
+  objective, not a correctness gate.
+- The frozen comparison was unavailable because the local store changed from
+  291 files / 411,058,543 bytes to 314 files / 441,430,099 bytes; no substitute
+  workload was used.
+- Performance is therefore unmeasured/deferred for this milestone, neither
+  passed nor failed. This does not authorize weakening correctness or privacy.
 
 ## Explicitly deferred
 
@@ -1212,8 +1212,8 @@ All must pass:
 Implement in this order: typed scan/coverage contracts; one-pass Codex scan;
 bounded scheduler and Git gate; invocation memoization; proof classification;
 coverage/scoring integration; fixed telemetry; synthetic tests; P1/P2 private
-validation; fresh 400 MiB benchmark.
+validation; record the milestone performance status.
 
 Do not begin a later deferred capability during this milestone. A completed
 handoff consists of the hard safety gates, accepted P1/P2 aggregate evidence,
-privacy review, and recorded benchmark—not a new causal feature claim.
+privacy review, and explicit performance status—not a new causal feature claim.

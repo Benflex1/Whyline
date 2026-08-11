@@ -106,8 +106,8 @@ export function renderRangeSummary(report: WhylineRangeReport): string {
       lines.push("    " + spanText(group) + "  unavailable");
     }
   }
-  if (report.correlations.length > MAX_RENDERED_GROUPS) {
-    lines.push(omission(report.correlations.length - MAX_RENDERED_GROUPS));
+  if (report.textualGroups.length > MAX_RENDERED_GROUPS) {
+    lines.push(omission(report.textualGroups.length - MAX_RENDERED_GROUPS));
   }
   return lines.join("\n");
 }

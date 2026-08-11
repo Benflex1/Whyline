@@ -136,11 +136,22 @@ export function renderRangeDetails(report: WhylineRangeReport): string {
   }
 
   lines.push("", "Codex provenance");
-  for (const group of report.correlations.slice(0, MAX_RENDERED_GROUPS)) {
-    lines.push(...renderCorrelationGroup(group));
+  const correlationByGroup = new Map(report.correlations.map((value) => [value.groupId, value]));
+  for (const textualGroup of visibleTextual) {
+    const correlation = correlationByGroup.get(textualGroup.id);
+    if (correlation === undefined) {
+      lines.push(...renderCorrelationGroup({
+        groupId: textualGroup.id,
+        spans: textualGroup.spans,
+        status: "not-run",
+        limitations: ["Uncommitted lines do not receive Codex attribution."],
+      }));
+    } else {
+      lines.push(...renderCorrelationGroup(correlation));
+    }
   }
-  if (report.correlations.length > MAX_RENDERED_GROUPS) {
-    lines.push(omission(report.correlations.length - MAX_RENDERED_GROUPS));
+  if (report.textualGroups.length > MAX_RENDERED_GROUPS) {
+    lines.push(omission(report.textualGroups.length - MAX_RENDERED_GROUPS));
   }
 
   lines.push("", "Analysis coverage");

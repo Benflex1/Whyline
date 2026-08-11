@@ -22,7 +22,9 @@ import type { CorrelationTelemetry } from "./correlation-telemetry.js";
 import type {
   GitBlameAttribution,
   GitProvenance,
+  RepositoryContext,
   ResolvedCodeLocation,
+  ResolvedRangeCodeLocation,
 } from "./model.js";
 import {
   groupTextualAttributions,
@@ -185,18 +187,12 @@ async function verifyStableRangeState(
   }
 }
 
-export async function analyzeRange(
-  input: string,
+export async function analyzeResolvedRange(
+  repository: RepositoryContext,
+  location: ResolvedRangeCodeLocation,
   options: AnalyzeRangeOptions = {},
 ): Promise<WhylineRangeReport> {
-  const parsed = parseLocationQuery(input);
-  if (parsed.kind !== "range") {
-    throw new InvalidInputError("range analysis requires <file>:<start>-<end>");
-  }
   const runner = options.git ?? defaultGitProcess;
-  const currentDirectory = options.currentDirectory ?? process.cwd();
-  const repository = await discoverRepositoryContext(runner, currentDirectory);
-  const location = await resolveRangeLocation(parsed, repository, runner, currentDirectory);
 
   const facts = location.targetState === "untracked"
     ? Array.from(
@@ -323,4 +319,19 @@ export async function analyzeRange(
   await options.hooks?.beforeFinalVerification?.(report);
   await verifyStableRangeState(runner, report);
   return report;
+}
+
+export async function analyzeRange(
+  input: string,
+  options: AnalyzeRangeOptions = {},
+): Promise<WhylineRangeReport> {
+  const parsed = parseLocationQuery(input);
+  if (parsed.kind !== "range") {
+    throw new InvalidInputError("range analysis requires <file>:<start>-<end>");
+  }
+  const runner = options.git ?? defaultGitProcess;
+  const currentDirectory = options.currentDirectory ?? process.cwd();
+  const repository = await discoverRepositoryContext(runner, currentDirectory);
+  const location = await resolveRangeLocation(parsed, repository, runner, currentDirectory);
+  return analyzeResolvedRange(repository, location, options);
 }

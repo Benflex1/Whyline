@@ -264,3 +264,45 @@ export function renderCorrelation(result: CorrelationResult): string {
   lines.push(renderCoverage(result));
   return lines.join("\n");
 }
+
+function summarySessionId(candidate: CorrelationCandidate): string | null {
+  return allocateSessionIds([candidate]).get(candidate) ?? null;
+}
+
+function summaryCandidateEvidence(candidate: CorrelationCandidate): string | null {
+  const explanations = candidateExplanations(candidate);
+  return explanations.length === 0 ? null : explanations.join("; ");
+}
+
+/** Bounded, outcome-first Codex wording for the default Whyline explanation. */
+export function renderCorrelationSummary(result: CorrelationResult): string[] {
+  const lines: string[] = [];
+  if (result.status === "matched" && result.selected !== undefined) {
+    const id = summarySessionId(result.selected);
+    if (id === null) {
+      lines.push("  AI provenance: no reliable Codex session match");
+    } else if (result.selected.band === "strong") {
+      lines.push(`  AI provenance: likely Codex session ${id}`);
+      const evidence = summaryCandidateEvidence(result.selected);
+      if (evidence !== null) lines.push(`    ${evidence}`);
+    } else {
+      lines.push(`  AI provenance: possible Codex session ${id}; evidence is insufficient to claim a match`);
+    }
+  } else if (result.status === "ambiguous") {
+    lines.push("  AI provenance: ambiguous; multiple strong Codex candidates");
+  } else if (result.status === "unavailable") {
+    lines.push("  AI provenance: unavailable");
+  } else {
+    const possible = possibleCandidate(result);
+    if (possible !== null) {
+      const id = summarySessionId(possible);
+      lines.push(id === null
+        ? "  AI provenance: no reliable Codex session match"
+        : `  AI provenance: possible Codex session ${id}; evidence is insufficient to claim a match`);
+    } else {
+      lines.push("  AI provenance: no reliable Codex match");
+    }
+  }
+  lines.push(`    ${renderCoverage(result).trim()}`);
+  return lines;
+}

@@ -9,6 +9,7 @@ import type { AgentHistorySource } from "../agents/agent-history-source.js";
 import { correlateCodex } from "./correlate-codex.js";
 import type { CorrelationTelemetry } from "./correlation-telemetry.js";
 import { buildCorrelationTarget } from "./build-correlation-target.js";
+import { traceLineAncestry } from "../git/trace-line-ancestry.js";
 import type {
   GitProvenance,
   WhylineReport,
@@ -146,25 +147,34 @@ export async function analyzeLocation(
     }
   }
 
+  let ancestry: WhylineReport["ancestry"];
   let correlation: WhylineReport["correlation"];
   if (provenance.state === "committed") {
     const target = buildCorrelationTarget(repository, location, provenance);
-    if (target !== null) {
-      correlation = await correlateCodex({
-        target,
-        location,
-        repository,
-        git: runner,
-        ...(options.agentHistorySource === undefined ? {} : { agentHistorySource: options.agentHistorySource }),
-        ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
-        ...(options.correlationTelemetry === undefined ? {} : { telemetry: options.correlationTelemetry }),
-      });
-    }
+    const correlationPromise = target === null
+      ? Promise.resolve(undefined)
+      : correlateCodex({
+          target,
+          location,
+          repository,
+          git: runner,
+          ...(options.agentHistorySource === undefined ? {} : { agentHistorySource: options.agentHistorySource }),
+          ...(options.codexHome === undefined ? {} : { codexHome: options.codexHome }),
+          ...(options.correlationTelemetry === undefined ? {} : { telemetry: options.correlationTelemetry }),
+        });
+    [ancestry, correlation] = await Promise.all([
+      traceLineAncestry(runner, repository, location, provenance),
+      correlationPromise,
+    ]);
   }
 
-  const report: WhylineReport = correlation === undefined
-    ? { repository, location, provenance }
-    : { repository, location, provenance, correlation };
+  const report: WhylineReport = {
+    repository,
+    location,
+    provenance,
+    ...(ancestry === undefined ? {} : { ancestry }),
+    ...(correlation === undefined ? {} : { correlation }),
+  };
   await options.hooks?.beforeFinalVerification?.(report);
   await verifyStableState(runner, report);
   return report;

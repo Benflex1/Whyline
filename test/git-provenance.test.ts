@@ -325,6 +325,7 @@ test("paths with spaces, Unicode, leading dashes, colons, tabs, and newlines are
     "space name.ts",
     "unicode-λ.ts",
     "-leading.ts",
+    "--generated.ts",
     "colon:name.ts",
     "tab\tname.ts",
     "line\nname.ts",
@@ -597,6 +598,7 @@ test("the provenance pipeline uses only bounded read-only Git command families",
     "ls-files",
     "ls-tree",
     "blame",
+    "merge-base",
     "show",
     "cat-file",
     "diff-tree",
@@ -634,8 +636,10 @@ test("representative CLI output is deterministic and control-character-free", as
     env: f.environment,
     maxBuffer: 256 * 1024,
   });
-  assert.match(result.stdout, /Textual attribution/);
-  assert.match(result.stdout, /Relevant change/);
+  assert.match(result.stdout, /Explanation/);
+  assert.match(result.stdout, /Textual last-touch/);
+  assert.match(result.stdout, /Git ancestry/);
+  assert.doesNotMatch(result.stdout, /Relevant change/);
   assert.doesNotMatch(result.stdout, /\u001b/);
   assert.doesNotMatch(result.stderr, /\u001b/);
 });
@@ -668,7 +672,7 @@ test("the CLI honors CODEX_HOME without consulting the ambient home profile", as
     env: { ...f.environment, HOME: ambientHome, FORCE_COLOR: "0" },
     maxBuffer: 256 * 1024,
   });
-  assert.match(result.stdout, /Likely related Codex session: synthetic-home-marker/);
+  assert.match(result.stdout, /AI provenance: likely Codex session synthetic-home-marker/);
   assert.doesNotMatch(result.stdout, /ambient-profile-marker/);
 });
 

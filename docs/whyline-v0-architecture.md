@@ -877,3 +877,34 @@ preflight's conservative behavior for unsupported transcript variants.
 
 - Git's official documentation defines `--line-porcelain`, NUL-safe diff name formats, stable porcelain status, and `git worktree list --porcelain -z`: <https://git-scm.com/docs>
 - The current Codex manual documents state under `$CODEX_HOME`, active sessions under `$CODEX_HOME/sessions`, archived sessions under `$CODEX_HOME/archived_sessions`, history persistence controls, and warns that transcript format is not a stable interface: <https://developers.openai.com/codex/codex-manual.md>
+
+## Exact Git-visible ancestry milestone
+
+The next milestone adds a deliberately narrower ancestry claim alongside the existing textual attribution and Codex correlation. These are three independent evidence domains:
+
+```text
+queried location
+    ├── baseline Git blame → textual last-touch
+    ├── exact Git ancestry → older exact predecessor
+    └── Codex correlation → AI provenance for textual last-touch
+```
+
+The baseline blame invocation remains unchanged. After it identifies textual commit `T`, path `P`, and the line in `T`, Whyline runs one candidate-only `git blame --line-porcelain -M -C` query. That result is never sufficient by itself. A candidate `A` must be different from `T`, be positively established as a proper reachable ancestor of `T`, and independently match a bounded contiguous block in the `T:P` and `A:path` blobs exactly.
+
+The exact block must contain the queried line, at least two unique lines using Whyline's existing distinctiveness predicate, and at least 40 alphanumeric characters. Whitespace, case, token, edit-distance, fuzzy, semantic, and transformed-code matching are not used. The supported labels are `same-file-move`, `cross-file-move-or-copy`, `renamed-path` when connected rename evidence is explicit, and `unclassified-exact` when no narrower label is safe. Cross-file move and copy are intentionally combined because Git evidence does not always distinguish them.
+
+No exact predecessor is not origin evidence. The default output says only that ancestry was not established, or that Git suggested movement but exact verification was insufficient. It never says “originated here,” “original commit,” or that a commit introduced an idea. Root history stops at `none / root-history-boundary`; incomplete shallow history is `unavailable / missing-history`; missing objects and unresolved merge parents remain typed unavailable outcomes. A fully proven visible shallow predecessor may be shown with a visible-history limitation, but is never called the ultimate origin. Dirty or untracked targets with no committed attribution do not run ancestry.
+
+Normal output is concise and explanation-first:
+
+```text
+whyline <file>:<line>
+```
+
+Forensic repository state, full commit metadata, changed paths, relevant hunks, detailed Codex evidence, ancestry candidates, proof counts, and limitations are available with:
+
+```text
+whyline --details <file>:<line>
+```
+
+JSON, ranges, symbols/functions, semantic or fuzzy ancestry, multi-hop ancestry graphs, persistent ancestry indexes, remote metadata, and additional agent adapters remain deferred.

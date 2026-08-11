@@ -4,6 +4,7 @@ import type {
   GitPathChange,
   WhylineReport,
 } from "../provenance/model.js";
+import type { GitAncestryResult } from "../ancestry/model.js";
 import { renderCorrelation } from "./render-correlation.js";
 
 const MAX_RENDERED_CHANGES = 24;
@@ -89,6 +90,42 @@ function renderBody(body: string): string[] {
   return lines.map((line) => `  ${sanitizeTerminalText(line)}`);
 }
 
+function renderAncestryDetails(ancestry: GitAncestryResult | undefined): string[] {
+  const lines = ["", "Git ancestry"];
+  if (ancestry === undefined) {
+    lines.push("  not run for an uncommitted target");
+    return lines;
+  }
+  lines.push(`  status: ${ancestry.status}`);
+  switch (ancestry.status) {
+    case "exact":
+      lines.push(`  transition: ${ancestry.transition}`);
+      lines.push(`  ancestor: ${sanitizeTerminalText(ancestry.ancestor.commitId)} ${sanitizeTerminalText(ancestry.ancestor.path)}:${ancestry.ancestor.line}`);
+      lines.push(`  earlier attribution: ${sanitizeTerminalText(ancestry.ancestorSubject)}`);
+      lines.push(`  proof: lines=${ancestry.proof.matchedLineCount}, distinctive=${ancestry.proof.distinctiveLineCount}, alphanumeric=${ancestry.proof.alphanumericCount}, current=${ancestry.proof.currentStartLine}, ancestor=${ancestry.proof.ancestorStartLine}`);
+      break;
+    case "uncertain":
+      lines.push(`  reason: ${ancestry.reason}`);
+      if (ancestry.candidate !== undefined) {
+        lines.push(`  candidate: ${sanitizeTerminalText(ancestry.candidate.commitId)} ${sanitizeTerminalText(ancestry.candidate.path)}:${ancestry.candidate.line}`);
+      }
+      break;
+    case "none":
+      lines.push(`  reason: ${ancestry.reason}`);
+      break;
+    case "unavailable":
+      lines.push(`  reason: ${ancestry.reason}`);
+      if (ancestry.candidate !== undefined) {
+        lines.push(`  candidate: ${sanitizeTerminalText(ancestry.candidate.commitId)} ${sanitizeTerminalText(ancestry.candidate.path)}:${ancestry.candidate.line}`);
+      }
+      break;
+  }
+  for (const value of [...new Set(ancestry.limitations)]) {
+    lines.push(`  limitation: ${sanitizeTerminalText(value)}`);
+  }
+  return lines;
+}
+
 export function renderText(report: WhylineReport): string {
   const { location, provenance } = report;
   const output: string[] = [`${sanitizeTerminalText(location.repositoryPath)}:${location.requestedLine}`, "", "State"];
@@ -128,6 +165,8 @@ export function renderText(report: WhylineReport): string {
     output.push(`  ${sanitizeTerminalText(provenance.blame.filename)}:${provenance.blame.originalLine}`);
   }
 
+  output.push(...renderAncestryDetails(report.ancestry));
+
   output.push("", "Relevant change");
   output.push(`  parent: ${sanitizeTerminalText(parentDescription(report))}`);
   if (provenance.changedPaths.length === 0) {
@@ -158,4 +197,8 @@ export function renderText(report: WhylineReport): string {
     output.push("", ...renderCorrelation(report.correlation).split("\n"));
   }
   return output.join("\n");
+}
+
+export function renderDetails(report: WhylineReport): string {
+  return renderText(report);
 }

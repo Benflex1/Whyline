@@ -1,4 +1,5 @@
 import type { CorrelationResult } from "../correlation/model.js";
+import type { GitAncestryResult } from "../ancestry/model.js";
 
 export type ClaimBasis = "fact" | "derived" | "inferred";
 
@@ -167,5 +168,6 @@ export interface WhylineReport {
   readonly repository: RepositoryContext;
   readonly location: ResolvedCodeLocation;
   readonly provenance: GitProvenance;
+  readonly ancestry?: GitAncestryResult;
   readonly correlation?: CorrelationResult;
 }

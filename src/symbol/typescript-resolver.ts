@@ -335,6 +335,10 @@ function ambiguityMessage(
   return `symbol \`${selector}\` is ambiguous in ${repositoryPath}\n\nCandidates:\n${lines.join("\n")}`;
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function selectSymbol(
   selector: string,
   repositoryPath: string,
@@ -346,8 +350,8 @@ function selectSymbol(
       : candidate.name === selector)
     .sort((left, right) => left.startLine - right.startLine
       || left.endLine - right.endLine
-      || left.kind.localeCompare(right.kind)
-      || left.qualifiedName.localeCompare(right.qualifiedName));
+      || compareText(left.kind, right.kind)
+      || compareText(left.qualifiedName, right.qualifiedName));
   if (matches.length === 0) {
     throw new InvalidInputError(`symbol \`${selector}\` was not found in ${repositoryPath}`);
   }

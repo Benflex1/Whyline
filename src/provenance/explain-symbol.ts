@@ -1,4 +1,4 @@
-import { defaultGitProcess, type GitRunner } from "../git/git-process.js";
+import { defaultGitProcess } from "../git/git-process.js";
 import { discoverRepositoryContext } from "../git/repository-context.js";
 import {
   resolveCurrentSource,
@@ -13,9 +13,7 @@ import {
 import type { SymbolResolution } from "../symbol/model.js";
 import { resolveTypeScriptSymbol } from "../symbol/typescript-resolver.js";
 
-export interface AnalyzeSymbolOptions extends AnalyzeRangeOptions {
-  readonly git?: GitRunner;
-}
+export type AnalyzeSymbolOptions = AnalyzeRangeOptions;
 
 export interface WhylineSymbolReport {
   readonly selector: string;

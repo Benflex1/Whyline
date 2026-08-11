@@ -25,9 +25,21 @@ test("keeps single-dash-leading paths usable as locations", () => {
   });
 });
 
+test("keeps double-dash-leading paths usable as locations", () => {
+  assert.deepEqual(parseArguments(["--generated.ts:1"]), {
+    details: false,
+    location: "--generated.ts:1",
+  });
+  assert.deepEqual(parseArguments(["--details", "--generated.ts:1"]), {
+    details: true,
+    location: "--generated.ts:1",
+  });
+});
+
 test("rejects unknown, repeated, misplaced, and missing flags as usage errors", () => {
   for (const argv of [
     [],
+    ["--unknown"],
     ["--unknown", "src/parser.ts:42"],
     ["--details", "--details", "src/parser.ts:42"],
     ["src/parser.ts:42", "--details"],

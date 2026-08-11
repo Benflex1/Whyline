@@ -17,6 +17,7 @@ import {
   type GitResult,
   type GitRunner,
 } from "./git-process.js";
+import { OperationalError } from "../whyline-error.js";
 
 const GIT_OBJECT_ID = /^[0-9a-fA-F]{7,128}$/;
 const MAX_SUBJECT_LENGTH = 240;
@@ -47,6 +48,21 @@ function unavailable(
 
 function isObjectId(value: string): boolean {
   return GIT_OBJECT_ID.test(value);
+}
+
+async function runAncestryGit(
+  runner: GitRunner,
+  args: readonly string[],
+  cwd: string,
+  operation: string,
+): Promise<GitResult> {
+  try {
+    return await runner.run(args, { cwd });
+  } catch (error: unknown) {
+    if (error instanceof OperationalError) throw error;
+    const detail = error instanceof Error ? error.message : "unknown process error";
+    throw new OperationalError(`${operation} could not start: ${detail}`);
+  }
 }
 
 function shallowOrUnsupported(
@@ -93,15 +109,12 @@ async function resolveBlob(
     return { failure: shallowOrUnsupported(context) };
   }
 
-  let treeResult: GitResult;
-  try {
-    treeResult = await runner.run(
-      ["ls-tree", "-z", "--full-tree", commitId, "--", repositoryPath],
-      { cwd: context.worktreeRoot },
-    );
-  } catch {
-    return { failure: shallowOrUnsupported(context) };
-  }
+  const treeResult = await runAncestryGit(
+    runner,
+    ["ls-tree", "-z", "--full-tree", commitId, "--", repositoryPath],
+    context.worktreeRoot,
+    "ancestry tree lookup",
+  );
   if (treeResult.exitCode !== 0) {
     return { failure: shallowOrUnsupported(context) };
   }
@@ -110,15 +123,12 @@ async function resolveBlob(
     return { failure: shallowOrUnsupported(context) };
   }
 
-  let blobResult: GitResult;
-  try {
-    blobResult = await runner.run(
-      ["cat-file", "blob", treeBlob.objectId],
-      { cwd: context.worktreeRoot },
-    );
-  } catch {
-    return { failure: shallowOrUnsupported(context) };
-  }
+  const blobResult = await runAncestryGit(
+    runner,
+    ["cat-file", "blob", treeBlob.objectId],
+    context.worktreeRoot,
+    "ancestry blob lookup",
+  );
   if (blobResult.exitCode !== 0) {
     return { failure: shallowOrUnsupported(context) };
   }
@@ -136,37 +146,30 @@ async function movementBlame(
   if (!isObjectId(blame.objectId) || blame.filename.includes("\u0000")) {
     return { failure: shallowOrUnsupported(context) };
   }
-  let result: GitResult;
-  try {
-    result = await runner.run(
-      [
-        "-c",
-        "core.quotePath=false",
-        "-c",
-        "color.ui=false",
-        "blame",
-        "--line-porcelain",
-        "-M",
-        "-C",
-        "-L",
-        `${blame.originalLine},${blame.originalLine}`,
-        blame.objectId,
-        "--",
-        blame.filename,
-      ],
-      { cwd: context.worktreeRoot },
-    );
-  } catch {
-    return { failure: shallowOrUnsupported(context) };
-  }
+  const result = await runAncestryGit(
+    runner,
+    [
+      "-c",
+      "core.quotePath=false",
+      "-c",
+      "color.ui=false",
+      "blame",
+      "--line-porcelain",
+      "-M",
+      "-C",
+      "-L",
+      `${blame.originalLine},${blame.originalLine}`,
+      blame.objectId,
+      "--",
+      blame.filename,
+    ],
+    context.worktreeRoot,
+    "movement-aware Git blame",
+  );
   if (result.exitCode !== 0) {
     return { failure: shallowOrUnsupported(context) };
   }
-  try {
-    return { attribution: parseBlamePorcelain(result.stdout, blame.filename) };
-  } catch {
-    return { failure: "unsupported-object" };
-  }
+  return { attribution: parseBlamePorcelain(result.stdout, blame.filename) };
 }
 
 async function hasProperReachability(
@@ -177,15 +180,12 @@ async function hasProperReachability(
 ): Promise<"yes" | "no" | "unavailable"> {
   if (!isObjectId(candidateId) || !isObjectId(textualId)) return "unavailable";
   if (candidateId.toLowerCase() === textualId.toLowerCase()) return "no";
-  let result: GitResult;
-  try {
-    result = await runner.run(
-      ["merge-base", "--is-ancestor", candidateId, textualId],
-      { cwd: context.worktreeRoot },
-    );
-  } catch {
-    return "unavailable";
-  }
+  const result = await runAncestryGit(
+    runner,
+    ["merge-base", "--is-ancestor", candidateId, textualId],
+    context.worktreeRoot,
+    "ancestry reachability check",
+  );
   if (result.exitCode === 0) return "yes";
   if (result.exitCode === 1) return "no";
   return "unavailable";
@@ -197,15 +197,12 @@ async function commitSubject(
   commitId: string,
 ): Promise<string | null> {
   if (!isObjectId(commitId)) return null;
-  let result: GitResult;
-  try {
-    result = await runner.run(
-      ["show", "-s", "--no-color", "--format=%s", commitId],
-      { cwd: context.worktreeRoot },
-    );
-  } catch {
-    return null;
-  }
+  const result = await runAncestryGit(
+    runner,
+    ["show", "-s", "--no-color", "--format=%s", commitId],
+    context.worktreeRoot,
+    "ancestry commit metadata lookup",
+  );
   if (result.exitCode !== 0) return null;
   return decodeGitUtf8(result.stdout).replace(/\r?\n$/, "").slice(0, MAX_SUBJECT_LENGTH);
 }

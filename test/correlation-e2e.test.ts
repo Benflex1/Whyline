@@ -532,12 +532,22 @@ function isAllowedReadOnlyGit(
       && normalized.slice(8).every(isSafeRepositoryPath);
   }
   if (command === "blame") {
-    return normalized.length === 6
+    const baseline = normalized.length === 6
       && normalized[1] === "--line-porcelain"
       && normalized[2] === "-L"
       && /^\d+,\d+$/.test(normalized[3]!)
       && normalized[4] === "--"
       && isSafeRepositoryPath(normalized[5]!);
+    const movement = normalized.length === 9
+      && normalized[1] === "--line-porcelain"
+      && normalized[2] === "-M"
+      && normalized[3] === "-C"
+      && normalized[4] === "-L"
+      && /^\d+,\d+$/.test(normalized[5]!)
+      && isHexCommit(normalized[6]!)
+      && normalized[7] === "--"
+      && isSafeRepositoryPath(normalized[8]!);
+    return baseline || movement;
   }
   return false;
 }

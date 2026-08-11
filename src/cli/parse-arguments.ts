@@ -1,4 +1,5 @@
 import { InvalidInputError } from "../whyline-error.js";
+import { parseLocation } from "../location/parse-location.js";
 
 export interface CliArguments {
   readonly details: boolean;
@@ -9,25 +10,32 @@ function usageError(): InvalidInputError {
   return new InvalidInputError("usage: whyline [--details] <file>:<line>");
 }
 
-function isUnsupportedFlag(value: string): boolean {
-  return value.startsWith("--");
+function isValidLocation(value: string): boolean {
+  try {
+    parseLocation(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseLocationArgument(value: string | undefined): string {
+  if (value === undefined || value === "--details") {
+    throw usageError();
+  }
+  if (value.startsWith("--") && !isValidLocation(value)) {
+    throw usageError();
+  }
+  return value;
 }
 
 export function parseArguments(argv: readonly string[]): CliArguments {
   if (argv.length === 1) {
-    const location = argv[0];
-    if (location === undefined || location === "--details" || isUnsupportedFlag(location)) {
-      throw usageError();
-    }
-    return { details: false, location };
+    return { details: false, location: parseLocationArgument(argv[0]) };
   }
 
   if (argv.length === 2 && argv[0] === "--details") {
-    const location = argv[1];
-    if (location === undefined || location === "--details" || isUnsupportedFlag(location)) {
-      throw usageError();
-    }
-    return { details: true, location };
+    return { details: true, location: parseLocationArgument(argv[1]) };
   }
 
   throw usageError();

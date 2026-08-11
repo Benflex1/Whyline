@@ -8,6 +8,7 @@ import { GitProcess, type GitRunner } from "../src/git/git-process.js";
 import { traceLineAncestry } from "../src/git/trace-line-ancestry.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
 import type { WhylineReport } from "../src/provenance/model.js";
+import { OperationalError } from "../src/whyline-error.js";
 
 const BLOCK = [
   "function parseTokenWithDistinctiveContext(input: string): string {",
@@ -368,4 +369,80 @@ test("a missing required blob object remains typed unavailable", async (t) => {
   assert.equal(result.status, "unavailable");
   if (result.status !== "unavailable") return;
   assert.equal(result.reason, "unsupported-object");
+});
+
+test("ancestry Git process failures remain operational during direct tracing and analysis", async (t) => {
+  const f = await fixture(t);
+  const targetPath = "src/process-failure.ts";
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...MOVED_BLOCK, ...AFTER_CONTEXT]);
+  await commitFixture(f, [targetPath], "process failure base");
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...AFTER_CONTEXT, ...MOVED_BLOCK]);
+  await commitFixture(f, [targetPath], "process failure move");
+
+  const report = await analyze(f, targetPath, 22);
+  const rejectingRunner: GitRunner = {
+    run: (args, options) => args.includes("blame") && args.includes("-M") && args.includes("-C")
+      ? Promise.reject(new Error("spawn EACCES"))
+      : f.runner.run(args, options),
+  };
+
+  await assert.rejects(
+    traceLineAncestry(rejectingRunner, report.repository, report.location, report.provenance),
+    (error: unknown) => error instanceof OperationalError && error.exitCode === 3,
+  );
+  await assert.rejects(
+    analyzeLocation(`${targetPath}:22`, {
+      currentDirectory: f.directory,
+      git: rejectingRunner,
+      codexHome: f.codexHome,
+    }),
+    (error: unknown) => error instanceof OperationalError && error.exitCode === 3,
+  );
+});
+
+test("malformed movement blame porcelain remains an operational failure", async (t) => {
+  const f = await fixture(t);
+  const targetPath = "src/malformed-blame.ts";
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...MOVED_BLOCK, ...AFTER_CONTEXT]);
+  await commitFixture(f, [targetPath], "malformed blame base");
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...AFTER_CONTEXT, ...MOVED_BLOCK]);
+  await commitFixture(f, [targetPath], "malformed blame move");
+
+  const report = await analyze(f, targetPath, 22);
+  const malformedRunner: GitRunner = {
+    run: (args, options) => args.includes("blame") && args.includes("-M") && args.includes("-C")
+      ? Promise.resolve({ stdout: Buffer.from("not porcelain\n"), stderr: Buffer.alloc(0), exitCode: 0, signal: null })
+      : f.runner.run(args, options),
+  };
+
+  await assert.rejects(
+    traceLineAncestry(malformedRunner, report.repository, report.location, report.provenance),
+    (error: unknown) => error instanceof OperationalError && error.exitCode === 3,
+  );
+});
+
+test("merge-base exit 1 remains a normal negative reachability result", async (t) => {
+  const f = await fixture(t);
+  const targetPath = "src/negative-reachability.ts";
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...MOVED_BLOCK, ...AFTER_CONTEXT]);
+  await commitFixture(f, [targetPath], "negative reachability base");
+  await writeFixtureFile(f.directory, targetPath, [...BEFORE_CONTEXT, ...AFTER_CONTEXT, ...MOVED_BLOCK]);
+  await commitFixture(f, [targetPath], "negative reachability move");
+
+  const report = await analyze(f, targetPath, 22);
+  const negativeReachabilityRunner: GitRunner = {
+    run: (args, options) => args[0] === "merge-base" && args[1] === "--is-ancestor"
+      ? Promise.resolve({ stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 1, signal: null })
+      : f.runner.run(args, options),
+  };
+
+  const result = await traceLineAncestry(
+    negativeReachabilityRunner,
+    report.repository,
+    report.location,
+    report.provenance,
+  );
+  assert.equal(result.status, "uncertain");
+  if (result.status !== "uncertain") return;
+  assert.equal(result.reason, "candidate-not-exact");
 });

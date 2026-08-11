@@ -325,6 +325,7 @@ test("paths with spaces, Unicode, leading dashes, colons, tabs, and newlines are
     "space name.ts",
     "unicode-λ.ts",
     "-leading.ts",
+    "--generated.ts",
     "colon:name.ts",
     "tab\tname.ts",
     "line\nname.ts",

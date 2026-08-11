@@ -1,6 +1,6 @@
 # Whyline v0: Architecture and Milestone Plan
 
-**Status:** implemented baseline plus range-aware provenance milestone
+**Status:** implemented baseline plus range-aware and symbol-aware provenance milestones
 **Date:** 2026-08-08
 
 ## Executive decision
@@ -10,6 +10,8 @@ Whyline v0 answers one question for one current worktree line and now also suppo
 ```text
 whyline <file>:<line>
 whyline <file>:<start>-<end>
+whyline --symbol <selector> <file>
+whyline --details --symbol <selector> <file>
 ```
 
 It resolves current Git attribution for each queried line, compresses only equivalent evidence into textual groups, inspects exact Git-visible ancestry for covered lines, searches local Codex history through a Codex-specific adapter, and renders a fact-first range report. A useful Git-only report is a successful result. A Codex session is shown as the likely source only when the evidence is strong and unambiguous; otherwise Whyline shows plausible candidates or says that no reliable session match was found.
@@ -22,6 +24,10 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 
 - Accepts exactly one positive, one-based line location in the form `<file>:<line>`.
 - Accepts inclusive positive ranges in the form `<file>:<start>-<end>`, with ordered endpoints, both endpoints in the current UTF-8 text file, and a maximum of 200 lines.
+- Accepts exact file-scoped symbol selectors for TypeScript/JavaScript-family `.ts`, `.mts`, `.cts`, `.d.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`, and `.jsx` files, with ASCII case-insensitive extension matching. The selector may be Unicode and dot-qualified, but matching is exact and never repository-wide.
+- Resolves symbols with the locked TypeScript 5.9.x compiler API in an in-memory, syntax-only, one-file program using explicit ScriptKind, `noLib`, and `noResolve`; TypeScript is a runtime dependency but is loaded lazily only for symbol queries.
+- Supports named functions/classes/interfaces/types/enums, class methods/constructors, nested queryable declarations, and single-declarator const-bound arrow/function values. Named default declarations remain supported; unsupported declaration forms remain absent.
+- Treats overload families as contiguous syntax-only sibling runs and rejects ambiguity rather than selecting a candidate. Resolved declarations use complete AST boundaries and inherit the existing 200-line range limit.
 - Accepts repository-relative and absolute paths; resolves them against the current process directory and rejects paths outside the discovered worktree.
 - Operates on the current local worktree and `HEAD`, without fetching or contacting a remote.
 - Supports ordinary non-bare Git repositories and linked worktrees.
@@ -37,7 +43,8 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 
 ### What v0 does not do
 
-- No symbols, commit queries, diff-hunk queries, or revision-qualified locations.
+- No repository-wide symbol search, fuzzy/suffix/proximity matching, commit queries, diff-hunk queries, or revision-qualified locations.
+- No historical symbol identity, rename continuity, semantic symbol ancestry, symbol-origin claim, type checking, import/export graph, call graph, or reference search.
 - No web UI, IDE integration, daemon, server, account, telemetry, or external upload.
 - No GitHub, PR, issue, or remote-repository lookup.
 - No additional agent adapters beyond Codex.
@@ -77,7 +84,7 @@ An index improves repeated queries over very large histories, but v0 does not ye
 
 ## Proposed architecture
 
-Use strict TypeScript on Node.js 24 LTS, with ESM, npm, `tsc`, and the built-in `node:test` runner. The only required development packages should initially be `typescript` and `@types/node`; v0 needs no runtime dependency. Node's standard library covers subprocesses, paths, streaming JSONL, hashing, and filesystem access. Use a tiny hand-written parser for the single v0 command. Do not use a Git library: invoke the installed `git` executable with argument arrays and machine-readable formats, never through a shell. Require Git 2.31 or newer, then verify every selected option against that floor in CI.
+Use strict TypeScript on Node.js 24 LTS, with ESM, npm, `tsc`, and the built-in `node:test` runner. TypeScript 5.9.x is a runtime dependency because symbol queries load its public compiler API lazily; `@types/node` remains a development dependency. Node's standard library covers subprocesses, paths, streaming JSONL, hashing, and filesystem access. Use a tiny hand-written CLI parser for the supported commands. Do not use a Git library: invoke the installed `git` executable with argument arrays and machine-readable formats, never through a shell. Require Git 2.31 or newer, then verify every selected option against that floor in CI.
 
 Suggested source structure:
 
@@ -88,9 +95,14 @@ src/
     render-text.ts          terminal report only
     render-range-summary.ts bounded range summary
     render-range-details.ts bounded range forensic report
+    render-symbol-summary.ts symbol header plus shared range summary
+    render-symbol-details.ts symbol resolver metadata plus shared range details
   location/
     parse-location.ts       <file>:<line>, including Windows-drive-safe parsing
     resolve-location.ts     canonical worktree-relative location and line state
+  symbol/
+    model.ts                current-worktree symbol resolution metadata
+    typescript-resolver.ts  lazy syntax-only TypeScript-family resolver
   git/
     git-process.ts          typed, read-only subprocess boundary
     repository-context.ts   root/common-dir/worktree/HEAD/dirty identity
@@ -113,6 +125,7 @@ src/
   provenance/
     explain-location.ts     orchestration and fact/derivation/inference assembly
     explain-range.ts        range orchestration and stability gate
+    explain-symbol.ts       snapshot-backed symbol-to-range orchestration
     range-model.ts          line facts, groups, coverage, and range report
     model.ts                shared domain types
 test/
@@ -208,6 +221,17 @@ Range analysis is a dedicated aggregation path:
 7. Verify repository HEAD, branch, target snapshot, and dirty state before rendering the successful result.
 
 Grouping is deterministic compression, never authority. Textual groups retain their separate source spans and split on committed/uncommitted state, commit, blamed path, or selected parent differences.
+
+### Symbol data flow
+
+Symbol analysis is a navigation/context layer over the range pipeline:
+
+1. Parse `--symbol <selector> <file>` as a separate CLI query; the selector and file remain separate argv values so unusual paths stay intact.
+2. Discover the repository, canonicalize and securely read the current file once, validate UTF-8/binary status, and retain the decoded text, lines, target status, and `FileSnapshot`.
+3. Pass that same decoded text to a lazy TypeScript 5.9 public-API syntax-only program. Reject any syntactic diagnostic anywhere in the file with exit 2; parser load/runtime failures are exit 3.
+4. Collect only supported named declarations, exact Unicode-safe names, syntactic overload families, and deterministic candidate ranges. Reject not-found, ambiguity, unsupported extension, malformed selectors, and declarations over 200 lines before provenance work.
+5. Construct `ResolvedRangeCodeLocation` from the retained source snapshot without rereading the file, then call `analyzeResolvedRange` exactly once.
+6. Render a symbol header and bounded resolver metadata before the unchanged textual, exact-ancestry, and Codex range sections. The report may claim only that the current-worktree parser resolved the named declaration to the displayed lines; historical identity and symbol origin remain explicitly unclaimed.
 
 ## Provenance model
 

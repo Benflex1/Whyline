@@ -332,6 +332,20 @@ function parentRevision(parent: ParentSelection): string | null {
   return parent.kind === "commit" ? parent.commitId : null;
 }
 
+export async function loadCommitMetadata(
+  runner: GitRunner,
+  context: RepositoryContext,
+  objectId: string,
+): Promise<GitCommit> {
+  const showResult = await requireGitSuccess(
+    runner,
+    ["show", "-s", "--no-color", "--no-show-signature", "--format=" + COMMIT_FORMAT, objectId],
+    context.worktreeRoot,
+    "commit inspection",
+  );
+  return parseCommitRecord(showResult.stdout);
+}
+
 async function objectExists(
   runner: GitRunner,
   cwd: string,
@@ -394,22 +408,14 @@ function pathMatchesHunk(hunk: GitHunk, paths: ReadonlySet<string>): boolean {
     || (hunk.newPath !== null && paths.has(hunk.newPath));
 }
 
-export async function inspectCommit(
+export async function inspectCommitEvidence(
   runner: GitRunner,
   context: RepositoryContext,
   location: ResolvedCodeLocation,
   blame: GitBlameAttribution,
+  commit: GitCommit,
+  parent: ParentSelection,
 ): Promise<CommitInspection> {
-  const showResult = await requireGitSuccess(
-    runner,
-    ["show", "-s", "--no-color", "--no-show-signature", `--format=${COMMIT_FORMAT}`, blame.objectId],
-    context.worktreeRoot,
-    "commit inspection",
-  );
-  const commit = parseCommitRecord(showResult.stdout);
-  const parent: ParentSelection = context.isShallow && commit.parents.length === 0
-    ? { basis: "derived", kind: "unavailable", reason: "shallow-history" }
-    : selectParent(commit, blame);
   const limitations: string[] = [];
 
   if (context.isShallow) {
@@ -487,4 +493,17 @@ export async function inspectCommit(
   }
 
   return { commit, parent, changedPaths, relevantHunks, limitations };
+}
+
+export async function inspectCommit(
+  runner: GitRunner,
+  context: RepositoryContext,
+  location: ResolvedCodeLocation,
+  blame: GitBlameAttribution,
+): Promise<CommitInspection> {
+  const commit = await loadCommitMetadata(runner, context, blame.objectId);
+  const parent: ParentSelection = context.isShallow && commit.parents.length === 0
+    ? { basis: "derived", kind: "unavailable", reason: "shallow-history" }
+    : selectParent(commit, blame);
+  return inspectCommitEvidence(runner, context, location, blame, commit, parent);
 }

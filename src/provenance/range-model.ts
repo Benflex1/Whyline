@@ -13,6 +13,7 @@ import type {
   RepositoryContext,
   ResolvedRangeCodeLocation,
 } from "./model.js";
+import { parentSelectionKey } from "./parent-key.js";
 
 export interface RangeLineSpan {
   readonly startLine: number;
@@ -102,14 +103,6 @@ export interface WhylineRangeReport {
   readonly coverage: RangeAnalysisCoverage;
 }
 
-function parentKey(parent: ParentSelection | null): string {
-  if (parent === null) return "none";
-  if (parent.kind === "commit") return "commit:" + parent.commitId;
-  if (parent.kind === "ambiguous") return "ambiguous:" + parent.parentIds.join(",");
-  if (parent.kind === "unavailable") return "unavailable:" + parent.reason;
-  return "root";
-}
-
 function groupKey(
   fact: RangeLineAttribution,
   inspection: RangeLineInspection,
@@ -120,7 +113,7 @@ function groupKey(
     state,
     commit,
     fact.blame.filename,
-    parentKey(inspection.parent),
+    parentSelectionKey(inspection.parent),
   ].join("\u0000");
 }
 

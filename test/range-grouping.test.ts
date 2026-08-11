@@ -15,6 +15,8 @@ import type {
   GitBlameAttribution,
   GitCommit,
   ParentSelection,
+  RepositoryContext,
+  ResolvedRangeCodeLocation,
 } from "../src/provenance/model.js";
 import {
   groupTextualAttributions,
@@ -54,6 +56,14 @@ function blame(
     lineContent: "line " + queryLine,
   };
   return { queryLine, blame: value };
+}
+
+function blameWithPrevious(queryLine: number, previousCommit: string): RangeLineAttribution {
+  const fact = blame(queryLine, COMMIT_A, "src/parser.ts");
+  return {
+    queryLine: fact.queryLine,
+    blame: { ...fact.blame, previousCommit },
+  };
 }
 
 function commit(id: string): GitCommit {
@@ -106,6 +116,33 @@ test("groups contiguous and non-contiguous equivalent committed facts", () => {
     { startLine: 5, endLine: 6 },
   ]);
   assert.equal(groups[0]?.lines.length, 4);
+});
+
+test("keeps parent-selection evidence differences in separate textual groups", () => {
+  const facts = [blame(1, COMMIT_A, "src/parser.ts"), blameWithPrevious(2, PARENT_A)];
+  const soleParent: ParentSelection = {
+    basis: "derived",
+    kind: "commit",
+    commitId: PARENT_A,
+    evidence: "sole-parent",
+  };
+  const blamePrevious: ParentSelection = {
+    basis: "derived",
+    kind: "commit",
+    commitId: PARENT_A,
+    evidence: "blame-previous",
+  };
+  const inspections = new Map<number, RangeLineInspection>([
+    [1, inspection(commit(COMMIT_A), soleParent)],
+    [2, inspection(commit(COMMIT_A), blamePrevious)],
+  ]);
+
+  const groups = groupTextualAttributions(facts, inspections);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups.map((group) => group.parent?.kind === "commit" ? group.parent.evidence : null), [
+    "sole-parent",
+    "blame-previous",
+  ]);
 });
 
 test("preserves mixed commits, paths, parents, and uncommitted state", () => {
@@ -170,6 +207,88 @@ class CountingRunner implements GitRunner {
     return this.delegate.run(args, options);
   }
 }
+
+function gitResult(stdout: Buffer, exitCode = 0): GitResult {
+  return { exitCode, stdout, stderr: Buffer.alloc(0), signal: null };
+}
+
+function syntheticCommitRecord(): Buffer {
+  return Buffer.from([
+    COMMIT_A,
+    PARENT_A,
+    "Author",
+    "author@example.test",
+    "2026-08-11T00:00:00Z",
+    "Committer",
+    "committer@example.test",
+    "2026-08-11T00:00:00Z",
+    "subject",
+    "body",
+    "",
+  ].join("\u0000"), "utf8");
+}
+
+class SyntheticInspectionRunner implements GitRunner {
+  public readonly calls: Array<readonly string[]> = [];
+
+  public async run(
+    args: readonly string[],
+    _options: { readonly cwd: string; readonly input?: Uint8Array },
+  ): Promise<GitResult> {
+    this.calls.push([...args]);
+    if (args[0] === "show") return gitResult(syntheticCommitRecord());
+    if (args[0] === "cat-file") return gitResult(Buffer.alloc(0));
+    if (args.includes("diff-tree")) return gitResult(Buffer.alloc(0));
+    if (args[0] === "-c" && args.includes("diff")) return gitResult(Buffer.alloc(0));
+    throw new Error("unexpected synthetic Git call: " + args.join(" "));
+  }
+}
+
+const syntheticRepository: RepositoryContext = {
+  worktreeRoot: "/repo",
+  gitDir: "/repo/.git",
+  commonGitDir: "/repo/.git",
+  objectFormat: "sha1",
+  isShallow: false,
+  headCommit: COMMIT_A,
+  branch: "main",
+  worktrees: [],
+};
+
+const syntheticLocation: ResolvedRangeCodeLocation = {
+  input: "src/parser.ts:1-2",
+  absolutePath: "/repo/src/parser.ts",
+  repositoryPath: "src/parser.ts",
+  startLine: 1,
+  endLine: 2,
+  lineContents: ["one", "two"],
+  lineDigests: ["one", "two"],
+  fileSnapshot: { size: 7, mtimeMs: 0, ino: 1, dev: 1, digest: "digest" },
+  targetState: "clean",
+  targetDirty: false,
+};
+
+test("inspection batching retains each fact's selected parent evidence", async () => {
+  const runner = new SyntheticInspectionRunner();
+  const facts = [blame(1, COMMIT_A, "src/parser.ts"), blameWithPrevious(2, PARENT_A)];
+  const inspections = await inspectRangeFacts(
+    runner,
+    syntheticRepository,
+    syntheticLocation,
+    facts,
+  );
+
+  const firstParent = inspections.get(1)?.parent;
+  const secondParent = inspections.get(2)?.parent;
+  assert.equal(firstParent?.kind, "commit");
+  assert.equal(secondParent?.kind, "commit");
+  if (firstParent?.kind !== "commit" || secondParent?.kind !== "commit") return;
+  assert.equal(firstParent.evidence, "sole-parent");
+  assert.equal(secondParent.evidence, "blame-previous");
+  assert.equal(runner.calls.filter((args) => args[0] === "show").length, 1);
+  assert.equal(runner.calls.filter((args) => args.includes("diff-tree")).length, 1);
+  assert.equal(runner.calls.filter((args) => args[0] === "-c" && args.includes("diff")).length, 1);
+});
 
 test("inspects repeated textual evidence with one metadata and diff set", async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "whyline-range-inspection-"));

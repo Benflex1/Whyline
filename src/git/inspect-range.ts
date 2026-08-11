@@ -19,6 +19,7 @@ import type {
   RangeLineAttribution,
   RangeLineInspection,
 } from "../provenance/range-model.js";
+import { parentSelectionKey } from "../provenance/parent-key.js";
 
 class MemoizedGitRunner implements GitRunner {
   private readonly cache = new Map<string, Promise<GitResult>>();
@@ -38,19 +39,6 @@ class MemoizedGitRunner implements GitRunner {
     const result = this.delegate.run(args, options);
     this.cache.set(key, result);
     return result;
-  }
-}
-
-function parentKey(parent: ParentSelection): string {
-  switch (parent.kind) {
-    case "root":
-      return "root";
-    case "commit":
-      return "commit:" + parent.commitId;
-    case "ambiguous":
-      return "ambiguous:" + parent.parentIds.join(",");
-    case "unavailable":
-      return "unavailable:" + parent.reason;
   }
 }
 
@@ -87,7 +75,7 @@ function preparedKey(value: PreparedFact): string {
   return [
     value.commit.id,
     value.fact.blame.filename,
-    parentKey(value.parent),
+    parentSelectionKey(value.parent),
   ].join("\u0000");
 }
 

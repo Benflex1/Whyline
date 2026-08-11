@@ -1,5 +1,6 @@
 import type {
   ExactBlockProof,
+  ExactTransitionKind,
   GitLineAncestor,
 } from "../ancestry/model.js";
 import type { CorrelationResult } from "../correlation/model.js";
@@ -58,6 +59,7 @@ export interface RangeAncestrySegment {
   readonly candidate?: GitLineAncestor;
   readonly ancestor?: GitLineAncestor;
   readonly ancestorSubject?: string;
+  readonly transition?: ExactTransitionKind;
   readonly proof?: ExactBlockProof;
   readonly limitations: readonly string[];
 }

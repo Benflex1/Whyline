@@ -1,19 +1,17 @@
 #!/usr/bin/env node
 import { pathToFileURL } from "node:url";
 
+import { parseArguments } from "./parse-arguments.js";
+import { renderSummary } from "./render-summary.js";
 import { renderText, sanitizeTerminalText } from "./render-text.js";
 import { analyzeLocation } from "../provenance/explain-location.js";
 import { WhylineError } from "../whyline-error.js";
 
 export async function runCli(argv: readonly string[]): Promise<number> {
-  if (argv.length !== 1) {
-    process.stderr.write("whyline: expected exactly one location in the form <file>:<line>\n");
-    return 2;
-  }
-
   try {
-    const report = await analyzeLocation(argv[0] as string);
-    process.stdout.write(`${renderText(report)}\n`);
+    const parsed = parseArguments(argv);
+    const report = await analyzeLocation(parsed.location);
+    process.stdout.write(`${parsed.details ? renderText(report) : renderSummary(report)}\n`);
     return 0;
   } catch (error: unknown) {
     if (error instanceof WhylineError) {

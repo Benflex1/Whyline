@@ -1,5 +1,5 @@
 import { InvalidInputError } from "../whyline-error.js";
-import { parseLocation } from "../location/parse-location.js";
+import { parseLocationQuery } from "../location/parse-location.js";
 
 export interface CliArguments {
   readonly details: boolean;
@@ -12,7 +12,7 @@ function usageError(): InvalidInputError {
 
 function isValidLocation(value: string): boolean {
   try {
-    parseLocation(value);
+    parseLocationQuery(value);
     return true;
   } catch {
     return false;

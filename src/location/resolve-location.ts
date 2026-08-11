@@ -14,9 +14,11 @@ import type {
   FileSnapshot,
   RepositoryContext,
   ResolvedCodeLocation,
+  ResolvedRangeCodeLocation,
 } from "../provenance/model.js";
 import { InvalidInputError, OperationalError } from "../whyline-error.js";
 import type { ParsedLocation } from "./parse-location.js";
+import type { RangeLocationQuery } from "./parse-location.js";
 
 const MAX_RETAINED_LINE_LENGTH = 4096;
 
@@ -173,6 +175,47 @@ export async function resolveLocation(
     requestedLine: parsed.line,
     lineContent: safeLineContent(lineContent),
     lineDigest: digest(Buffer.from(lineContent, "utf8")),
+    fileSnapshot: file.snapshot,
+    targetState: status.state,
+    targetDirty: status.dirty,
+  };
+}
+
+export async function resolveRangeLocation(
+  parsed: RangeLocationQuery,
+  context: RepositoryContext,
+  runner: GitRunner,
+  currentDirectory: string,
+): Promise<ResolvedRangeCodeLocation> {
+  const candidatePath = path.isAbsolute(parsed.file)
+    ? path.normalize(parsed.file)
+    : path.resolve(currentDirectory, parsed.file);
+  const canonicalPath = await resolveCanonicalPath(context, candidatePath, runner);
+  const repositoryPath = repositoryPathFor(context.worktreeRoot, canonicalPath);
+  const file = await readSnapshot(canonicalPath);
+  const text = decodeText(file.bytes);
+  const lines = splitTextLines(text);
+  const first = lines[parsed.startLine - 1];
+  const last = lines[parsed.endLine - 1];
+  if (first === undefined || last === undefined) {
+    throw new InvalidInputError("range endpoint is beyond end of file");
+  }
+
+  const lineContents = lines
+    .slice(parsed.startLine - 1, parsed.endLine)
+    .map(safeLineContent);
+  const lineDigests = lines
+    .slice(parsed.startLine - 1, parsed.endLine)
+    .map((line) => digest(Buffer.from(line, "utf8")));
+  const status: TargetStatus = await readTargetStatus(runner, context, repositoryPath);
+  return {
+    input: parsed.input,
+    absolutePath: canonicalPath,
+    repositoryPath,
+    startLine: parsed.startLine,
+    endLine: parsed.endLine,
+    lineContents,
+    lineDigests,
     fileSnapshot: file.snapshot,
     targetState: status.state,
     targetDirty: status.dirty,

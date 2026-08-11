@@ -2,7 +2,10 @@ import { defaultGitProcess, requireGitSuccess, type GitRunner } from "../git/git
 import { blameRange } from "../git/blame-range.js";
 import { discoverRepositoryContext, readTargetStatus } from "../git/repository-context.js";
 import { inspectRangeFacts } from "../git/inspect-range.js";
-import { traceRangeGroupAncestry } from "../git/trace-range-ancestry.js";
+import {
+  createRangeAncestryTraceCache,
+  traceRangeGroupAncestry,
+} from "../git/trace-range-ancestry.js";
 import {
   currentLocationSnapshot,
   resolveRangeLocation,
@@ -229,6 +232,7 @@ export async function analyzeRange(
   const workBoundGroups = committedGroups.slice(MAX_DEEP_GROUPS);
   const ancestry = new Map<string, RangeAncestryCoverage>();
   const correlations: RangeCorrelationGroup[] = [];
+  const ancestryCache = createRangeAncestryTraceCache();
 
   for (const group of textualGroups.filter((value) => value.state === "uncommitted")) {
     ancestry.set(group.id, notRunCoverage(
@@ -256,7 +260,13 @@ export async function analyzeRange(
       groupLocation,
       groupProvenance(location, group),
     );
-    const ancestryPromise = traceRangeGroupAncestry(runner, repository, location, group);
+    const ancestryPromise = traceRangeGroupAncestry(
+      runner,
+      repository,
+      location,
+      group,
+      ancestryCache,
+    );
     const correlationPromise = prepared === undefined || groupTarget === null
       ? Promise.resolve<RangeCorrelationGroup>({
         groupId: group.id,
@@ -314,4 +324,3 @@ export async function analyzeRange(
   await verifyStableRangeState(runner, report);
   return report;
 }
-

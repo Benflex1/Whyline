@@ -7,7 +7,7 @@ export interface CliArguments {
 }
 
 function usageError(): InvalidInputError {
-  return new InvalidInputError("usage: whyline [--details] <file>:<line>");
+  return new InvalidInputError("usage: whyline [--details] <file>:<line|start-end>");
 }
 
 function isValidLocation(value: string): boolean {

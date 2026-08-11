@@ -43,7 +43,21 @@ interface CandidateRun {
   readonly records: readonly CandidateRecord[];
 }
 
-type MaterialFailure = "missing-history" | "unsupported-object";
+export type RangeAncestryMaterialFailure = "missing-history" | "unsupported-object";
+
+export interface RangeAncestryTraceCache {
+  readonly reachability: Map<string, Promise<"yes" | "no" | "unavailable">>;
+  readonly blob: Map<string, Promise<{ readonly material: BlobMaterial } | { readonly failure: RangeAncestryMaterialFailure }>>;
+  readonly subject: Map<string, Promise<string | null>>;
+}
+
+export function createRangeAncestryTraceCache(): RangeAncestryTraceCache {
+  return {
+    reachability: new Map(),
+    blob: new Map(),
+    subject: new Map(),
+  };
+}
 
 interface LineOutcome {
   readonly status: RangeAncestrySegment["status"];
@@ -63,7 +77,7 @@ function isObjectId(value: string): boolean {
   return GIT_OBJECT_ID.test(value);
 }
 
-function shallowFailure(context: RepositoryContext): MaterialFailure {
+function shallowFailure(context: RepositoryContext): RangeAncestryMaterialFailure {
   return context.isShallow ? "missing-history" : "unsupported-object";
 }
 
@@ -123,7 +137,7 @@ async function resolveBlob(
   context: RepositoryContext,
   commitId: string,
   repositoryPath: string,
-): Promise<{ readonly material: BlobMaterial } | { readonly failure: MaterialFailure }> {
+): Promise<{ readonly material: BlobMaterial } | { readonly failure: RangeAncestryMaterialFailure }> {
   if (!isObjectId(commitId) || repositoryPath.length === 0 || repositoryPath.includes("\u0000")) {
     return { failure: shallowFailure(context) };
   }
@@ -156,7 +170,7 @@ async function movementBlame(
   group: RangeTextualGroup,
   startLine: number,
   endLine: number,
-): Promise<readonly RangeLineAttribution[] | { readonly failure: MaterialFailure }> {
+): Promise<readonly RangeLineAttribution[] | { readonly failure: RangeAncestryMaterialFailure }> {
   if (
     group.commit === null
     || group.blamedPath === null
@@ -417,7 +431,7 @@ async function analyzeRun(
   sourceToFacts: ReadonlyMap<number, readonly RangeLineAttribution[]>,
   currentMaterial: BlobMaterial,
   reachabilityCache: Map<string, Promise<"yes" | "no" | "unavailable">>,
-  blobCache: Map<string, Promise<{ readonly material: BlobMaterial } | { readonly failure: MaterialFailure }>>,
+  blobCache: Map<string, Promise<{ readonly material: BlobMaterial } | { readonly failure: RangeAncestryMaterialFailure }>>,
   subjectCache: Map<string, Promise<string | null>>,
   outcomes: Map<number, LineOutcome>,
 ): Promise<void> {
@@ -515,6 +529,7 @@ export async function traceRangeGroupAncestry(
   context: RepositoryContext,
   location: ResolvedRangeCodeLocation,
   group: RangeTextualGroup,
+  cache: RangeAncestryTraceCache = createRangeAncestryTraceCache(),
 ): Promise<RangeAncestryCoverage> {
   const outcomes = new Map<number, LineOutcome>();
   for (const fact of group.lines) {
@@ -587,14 +602,11 @@ export async function traceRangeGroupAncestry(
   const runs = candidateRuns(movement, sourceToFacts, group.commit.id);
   if (runs.length === 0) return makeCoverage(group, outcomes);
 
-  const reachabilityCache = new Map<string, Promise<"yes" | "no" | "unavailable">>();
-  const blobCache = new Map<string, Promise<{ readonly material: BlobMaterial } | { readonly failure: MaterialFailure }>>();
-  const subjectCache = new Map<string, Promise<string | null>>();
   const currentKey = group.commit.id + "\u0000" + group.blamedPath;
-  let currentMaterialPromise = blobCache.get(currentKey);
+  let currentMaterialPromise = cache.blob.get(currentKey);
   if (currentMaterialPromise === undefined) {
     currentMaterialPromise = resolveBlob(runner, context, group.commit.id, group.blamedPath);
-    blobCache.set(currentKey, currentMaterialPromise);
+    cache.blob.set(currentKey, currentMaterialPromise);
   }
   const currentMaterialResult = await currentMaterialPromise;
   if ("failure" in currentMaterialResult) {
@@ -616,9 +628,9 @@ export async function traceRangeGroupAncestry(
       run,
       sourceToFacts,
       currentMaterialResult.material,
-      reachabilityCache,
-      blobCache,
-      subjectCache,
+      cache.reachability,
+      cache.blob,
+      cache.subject,
       outcomes,
     );
   }

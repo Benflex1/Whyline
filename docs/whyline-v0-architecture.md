@@ -1,17 +1,18 @@
 # Whyline v0: Architecture and Milestone Plan
 
-**Status:** proposed
+**Status:** implemented baseline plus range-aware provenance milestone
 **Date:** 2026-08-08
 
 ## Executive decision
 
-Whyline v0 should answer one question for one current worktree line:
+Whyline v0 answers one question for one current worktree line and now also supports a bounded inclusive range:
 
 ```text
 whyline <file>:<line>
+whyline <file>:<start>-<end>
 ```
 
-It should resolve the line's current Git attribution, inspect the responsible commit, search local Codex history through a Codex-specific adapter, rank any matching sessions conservatively, and render a fact-first terminal report. A useful Git-only report is a successful result. A Codex session is shown as the likely source only when the evidence is strong and unambiguous; otherwise Whyline shows plausible candidates or says that no reliable session match was found.
+It resolves current Git attribution for each queried line, compresses only equivalent evidence into textual groups, inspects exact Git-visible ancestry for covered lines, searches local Codex history through a Codex-specific adapter, and renders a fact-first range report. A useful Git-only report is a successful result. A Codex session is shown as the likely source only when the evidence is strong and unambiguous; otherwise Whyline shows plausible candidates or says that no reliable session match was found.
 
 The v0 pipeline should run on demand and keep no persistent index. The most important work before implementation is a focused, read-only Codex transcript preflight. OpenAI's current documentation names `$CODEX_HOME/sessions` and `$CODEX_HOME/archived_sessions`, but explicitly says the transcript format is not a stable interface. Designing a parser from assumed JSONL records would therefore be premature.
 
@@ -20,6 +21,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 ### What v0 does
 
 - Accepts exactly one positive, one-based line location in the form `<file>:<line>`.
+- Accepts inclusive positive ranges in the form `<file>:<start>-<end>`, with ordered endpoints, both endpoints in the current UTF-8 text file, and a maximum of 200 lines.
 - Accepts repository-relative and absolute paths; resolves them against the current process directory and rejects paths outside the discovered worktree.
 - Operates on the current local worktree and `HEAD`, without fetching or contacting a remote.
 - Supports ordinary non-bare Git repositories and linked worktrees.
@@ -35,7 +37,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 
 ### What v0 does not do
 
-- No line ranges, symbols, commit queries, diff-hunk queries, or revision-qualified locations.
+- No symbols, commit queries, diff-hunk queries, or revision-qualified locations.
 - No web UI, IDE integration, daemon, server, account, telemetry, or external upload.
 - No GitHub, PR, issue, or remote-repository lookup.
 - No additional agent adapters beyond Codex.
@@ -84,6 +86,8 @@ src/
   cli/
     main.ts                 parse input, map errors to exit codes
     render-text.ts          terminal report only
+    render-range-summary.ts bounded range summary
+    render-range-details.ts bounded range forensic report
   location/
     parse-location.ts       <file>:<line>, including Windows-drive-safe parsing
     resolve-location.ts     canonical worktree-relative location and line state
@@ -91,7 +95,10 @@ src/
     git-process.ts          typed, read-only subprocess boundary
     repository-context.ts   root/common-dir/worktree/HEAD/dirty identity
     blame-line.ts           one-line porcelain parser
+    blame-range.ts          one-command range porcelain parser
     inspect-commit.ts       metadata, selected parent, paths, relevant hunks
+    inspect-range.ts        deduplicated commit/parent inspection
+    trace-range-ancestry.ts exact proof coverage for queried spans
   agents/
     agent-history-source.ts adapter contract and normalized types
     codex/
@@ -105,6 +112,8 @@ src/
     correlate.ts            selection versus ambiguity
   provenance/
     explain-location.ts     orchestration and fact/derivation/inference assembly
+    explain-range.ts        range orchestration and stability gate
+    range-model.ts          line facts, groups, coverage, and range report
     model.ts                shared domain types
 test/
   fixtures/
@@ -186,6 +195,20 @@ there is no general configuration surface or persistent history state.
 8. Calculate independent correlation signals and contradictions. Apply confidence gates and ambiguity rules.
 9. Assemble a report model with explicit claim provenance and render it.
 
+### Range data flow
+
+Range analysis is a dedicated aggregation path:
+
+1. Parse and resolve the range once, including one UTF-8 file snapshot.
+2. Run one `git blame --line-porcelain -L START,END -- PATH` and retain one fact per queried line.
+3. Load unique commit metadata once, select parents from each line's blame evidence, and inspect each reusable commit/parent/path group once.
+4. Trace movement-aware ancestry at span granularity. Exact status is attached only to queried lines covered by independently valid exact proof blocks; uncovered lines remain separately typed.
+5. Prepare Codex history once, then project the unchanged correlation semantics independently onto committed textual groups.
+6. Deep-analyze only the first 24 committed textual groups in source order. Later groups are `unavailable / work-bound`; uncommitted groups receive no ancestry or Codex attribution.
+7. Verify repository HEAD, branch, target snapshot, and dirty state before rendering the successful result.
+
+Grouping is deterministic compression, never authority. Textual groups retain their separate source spans and split on committed/uncommitted state, commit, blamed path, or selected parent differences.
+
 ## Provenance model
 
 Every user-visible claim has a `basis`:
@@ -220,6 +243,19 @@ interface CodeLocation {
   endLine: number;
   revision: "WORKTREE";
   lineDigest: string;         // ephemeral digest, never a persistent identity
+}
+
+type LocationQuery =
+  | { kind: "line"; file: string; line: number }
+  | { kind: "range"; file: string; startLine: number; endLine: number };
+
+interface ResolvedRangeCodeLocation extends CodeLocation {
+  startLine: number;
+  endLine: number;
+  lineContents: string[];
+  lineDigests: string[];
+  targetState: string;
+  targetDirty: boolean;
 }
 
 interface GitProvenance {

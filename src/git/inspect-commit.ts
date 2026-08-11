@@ -205,7 +205,11 @@ function pathFromDiffMarker(value: string, prefix: "a/" | "b/"): string | null {
   return decoded.startsWith(prefix) ? decoded.slice(prefix.length) : decoded;
 }
 
-function addHunkLine(builder: HunkBuilder, line: string, targetLine: number): void {
+function addHunkLine(
+  builder: HunkBuilder,
+  line: string,
+  targetLines: number | ReadonlySet<number>,
+): void {
   const lineBytes = Buffer.byteLength(line, "utf8") + 1;
   if (builder.rawBytes + lineBytes <= MAX_HUNK_RAW_BYTES) {
     builder.rawLines.push(line);
@@ -226,7 +230,10 @@ function addHunkLine(builder: HunkBuilder, line: string, targetLine: number): vo
   }
 
   if (kind === "added" || kind === "context") {
-    if (builder.nextNewLine === targetLine) {
+    const targets = typeof targetLines === "number"
+      ? builder.nextNewLine === targetLines
+      : targetLines.has(builder.nextNewLine);
+    if (targets) {
       builder.targetLineKind = kind;
     }
     builder.nextNewLine += 1;
@@ -254,7 +261,10 @@ function finishHunk(builder: HunkBuilder): GitHunk {
   };
 }
 
-export function parseUnifiedDiff(value: Buffer, targetLine: number): GitHunk[] {
+export function parseUnifiedDiff(
+  value: Buffer,
+  targetLines: number | ReadonlySet<number>,
+): GitHunk[] {
   const lines = decodeGitUtf8(value).split("\n");
   const hunks: GitHunk[] = [];
   let oldPath: string | null = null;
@@ -313,7 +323,7 @@ export function parseUnifiedDiff(value: Buffer, targetLine: number): GitHunk[] {
     }
 
     if (current !== null) {
-      addHunkLine(current, line, targetLine);
+      addHunkLine(current, line, targetLines);
     }
   }
   finish();
@@ -415,6 +425,7 @@ export async function inspectCommitEvidence(
   blame: GitBlameAttribution,
   commit: GitCommit,
   parent: ParentSelection,
+  targetLines?: ReadonlySet<number>,
 ): Promise<CommitInspection> {
   const limitations: string[] = [];
 
@@ -480,7 +491,10 @@ export async function inspectCommitEvidence(
     "relevant diff inspection",
   );
 
-  const parsedHunks = parseUnifiedDiff(diffResult.stdout, blame.finalLine);
+  const parsedHunks = parseUnifiedDiff(
+    diffResult.stdout,
+    targetLines ?? blame.finalLine,
+  );
   const relevantPaths = new Set(paths);
   const matching = parsedHunks.filter((hunk) => hunk.targetLineKind !== null && pathMatchesHunk(hunk, relevantPaths));
   const fallback = parsedHunks.filter((hunk) => hunk.targetLineKind !== null);

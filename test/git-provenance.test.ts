@@ -710,6 +710,24 @@ test("porcelain parsers preserve NUL-safe renames and hunk line kinds", () => {
   assert.equal(hunks[0]?.lines.filter((line) => line.kind === "added").length, 2);
 });
 
+test("parses all range target hunks in one diff result", () => {
+  const diff = Buffer.from([
+    "diff --git a/src/file.ts b/src/file.ts",
+    "--- a/src/file.ts",
+    "+++ b/src/file.ts",
+    "@@ -1,1 +1,1 @@",
+    "-old first",
+    "+new first",
+    "@@ -20,1 +20,1 @@",
+    "-old last",
+    "+new last",
+    "",
+  ].join("\n"), "utf8");
+  const hunks = parseUnifiedDiff(diff, new Set([1, 20]));
+  assert.equal(hunks.length, 2);
+  assert.equal(hunks.every((hunk) => hunk.targetLineKind === "added"), true);
+});
+
 test("blame porcelain captures previous path, metadata, and all-zero attribution", () => {
   const attribution = parseBlamePorcelain(
     Buffer.from("0000000000000000000000000000000000000000 7 7\nauthor Local\nauthor-mail <local@example.test>\nauthor-time 1\nauthor-tz +0000\ncommitter Local\ncommitter-mail <local@example.test>\ncommitter-time 1\ncommitter-tz +0000\nfilename path with spaces.ts\n\tlocal line\n", "utf8"),

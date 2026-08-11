@@ -175,6 +175,7 @@ export async function inspectRangeFacts(
       representative.fact.blame,
       representative.commit,
       representative.parent,
+      new Set(group.facts.map((value) => value.fact.queryLine)),
     );
     const normalized = asRangeInspection(inspection);
     for (const value of group.facts) {

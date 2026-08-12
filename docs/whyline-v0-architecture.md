@@ -27,7 +27,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 - Accepts exact file-scoped symbol selectors for TypeScript/JavaScript-family `.ts`, `.mts`, `.cts`, `.d.ts`, `.tsx`, `.js`, `.mjs`, `.cjs`, and `.jsx` files, with ASCII case-insensitive extension matching. The selector may be Unicode and dot-qualified, but matching is exact and never repository-wide.
 - Resolves symbols with the locked TypeScript 5.9.x compiler API in an in-memory, syntax-only, one-file program using explicit ScriptKind, `noLib`, and `noResolve`; TypeScript is a runtime dependency but is loaded lazily only for symbol queries.
 - Supports named functions/classes/interfaces/types/enums, class methods/constructors, nested queryable declarations, and single-declarator const-bound arrow/function values. Named default declarations remain supported; unsupported declaration forms remain absent.
-- Treats overload families as contiguous syntax-only sibling runs and rejects ambiguity rather than selecting a candidate. Resolved declarations use complete AST boundaries and inherit the existing 200-line range limit.
+- Treats overload families as contiguous syntax-only sibling runs and rejects ambiguity rather than selecting a candidate. Resolved declarations use exact AST boundaries to produce a declaration-covering line span, then inherit the existing 200-line range limit and line-granular provenance.
 - Accepts repository-relative and absolute paths; resolves them against the current process directory and rejects paths outside the discovered worktree.
 - Operates on the current local worktree and `HEAD`, without fetching or contacting a remote.
 - Supports ordinary non-bare Git repositories and linked worktrees.
@@ -230,8 +230,9 @@ Symbol analysis is a navigation/context layer over the range pipeline:
 2. Discover the repository, canonicalize and securely read the current file once, validate UTF-8/binary status, and retain the decoded text, lines, target status, and `FileSnapshot`.
 3. Pass that same decoded text to a lazy TypeScript 5.9 public-API syntax-only program. Reject any syntactic diagnostic anywhere in the file with exit 2; parser load/runtime failures are exit 3.
 4. Collect only supported named declarations, exact Unicode-safe names, syntactic overload families, and deterministic candidate ranges. Reject not-found, ambiguity, unsupported extension, malformed selectors, and declarations over 200 lines before provenance work.
-5. Construct `ResolvedRangeCodeLocation` from the retained source snapshot without rereading the file, then call `analyzeResolvedRange` exactly once.
-6. Render a symbol header and bounded resolver metadata before the unchanged textual, exact-ancestry, and Codex range sections. The report may claim only that the current-worktree parser resolved the named declaration to the displayed lines; historical identity and symbol origin remain explicitly unclaimed.
+5. Project the exact AST declaration to the smallest declaration-covering line span. Separate leading JSDoc/comment lines and separate trailing comment lines remain outside the span; text or trivia sharing the first or last line is included because provenance is line-granular.
+6. Construct `ResolvedRangeCodeLocation` from the retained source snapshot without rereading the file, then call `analyzeResolvedRange` exactly once.
+7. Render a symbol header and bounded resolver metadata before the unchanged textual, exact-ancestry, and Codex range sections. The report may claim only that the current-worktree parser resolved the named declaration to the displayed declaration-covering line span; historical identity and symbol origin remain explicitly unclaimed.
 
 ## Provenance model
 

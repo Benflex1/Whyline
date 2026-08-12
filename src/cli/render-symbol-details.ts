@@ -23,6 +23,7 @@ export function renderSymbolDetails(report: WhylineSymbolReport): string {
     `  resolved range: ${path}:${symbol.startLine}-${symbol.endLine}`,
     `  boundary: ${symbol.boundary}`,
     "  limitation: current-worktree syntax resolution only; no historical symbol identity is inferred",
+    "  limitation: provenance is line-granular; other text or trivia sharing the first or last resolved line is included",
   ];
   return renderRangeDetailsWithHeader(report.range, header);
 }

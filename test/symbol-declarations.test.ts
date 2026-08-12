@@ -25,7 +25,7 @@ function source(repositoryPath: string, text: string): CurrentSourceSnapshot {
   };
 }
 
-test("resolves declarations with complete AST boundaries", async () => {
+test("resolves declarations to declaration-covering line spans", async () => {
   const file = source("src/parser.ts", [
     "/** function docs are leading trivia */",
     "export function topParse<T>(value: T) {",
@@ -116,6 +116,35 @@ test("preserves declarations across BOM, CRLF, and missing final newline", async
   const result = await resolveTypeScriptSymbol("parseToken", file);
   assert.equal(result.startLine, 2);
   assert.equal(result.endLine, 4);
+});
+
+test("projects same-line leading and trailing material to one declaration-covering line span", async () => {
+  const result = await resolveTypeScriptSymbol(
+    "parseToken",
+    source("src/inline.ts", "/** docs */ function parseToken() {} // trailing\n"),
+  );
+  assert.equal(result.startLine, 1);
+  assert.equal(result.endLine, 1);
+});
+
+test("selects the queried declaration while retaining its shared line span", async () => {
+  const result = await resolveTypeScriptSymbol(
+    "first",
+    source("src/shared-line.ts", "function first() {} function second() {}\n"),
+  );
+  assert.equal(result.name, "first");
+  assert.equal(result.qualifiedName, "first");
+  assert.equal(result.startLine, 1);
+  assert.equal(result.endLine, 1);
+});
+
+test("excludes trivia on separate lines from the declaration-covering line span", async () => {
+  const result = await resolveTypeScriptSymbol(
+    "parseToken",
+    source("src/separate-trivia.ts", "/** docs */\nfunction parseToken() {}\n// trailing\n"),
+  );
+  assert.equal(result.startLine, 2);
+  assert.equal(result.endLine, 2);
 });
 
 test("does not reinterpret unsupported declaration forms", async () => {

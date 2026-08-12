@@ -316,7 +316,7 @@ function toResolution(
     qualifiedName: candidate.first.qualifiedName,
     startLine: lineNumber(sourceFile, start),
     endLine: lineNumber(sourceFile, endPosition),
-    boundary: "complete declaration",
+    boundary: "declaration-covering line span",
     ...(candidate.first.declarationForm === "const-function" ? { declarationForm: "const-function" } : {}),
   };
 }

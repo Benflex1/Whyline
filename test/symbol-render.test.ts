@@ -47,7 +47,7 @@ test("symbol renderers expose bounded resolver context without historical claims
       qualifiedName: "Parser.parseToken",
       startLine: 40,
       endLine: 76,
-      boundary: "complete declaration" as const,
+      boundary: "declaration-covering line span" as const,
     },
     range,
   };
@@ -61,6 +61,8 @@ test("symbol renderers expose bounded resolver context without historical claims
   assert.match(details, /language: TypeScript/);
   assert.match(details, /dialect: ts/);
   assert.match(details, /parser: TypeScript 5\.9\.3/);
+  assert.match(details, /boundary: declaration-covering line span/);
   assert.match(details, /limitation: current-worktree syntax resolution only/);
-  assert.doesNotMatch(details, /AST|source excerpt|compiler diagnostic|symbol origin|same historical identity|rename occurred/i);
+  assert.match(details, /provenance is line-granular; other text or trivia sharing the first or last resolved line is included/);
+  assert.doesNotMatch(details, /\bAST\b|source excerpt|compiler diagnostic|symbol origin|same historical identity|rename occurred/i);
 });

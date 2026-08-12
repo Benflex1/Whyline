@@ -13,8 +13,8 @@ whyline --symbol parseToken src/parser.ts
 whyline --details --symbol Parser.parseToken src/parser.ts
 ```
 
-The symbol layer resolves current-worktree syntax into one exact inclusive
-source range and then delegates to the existing range provenance engine. It is
+The symbol layer resolves current-worktree syntax into one declaration-covering
+line span and then delegates to the existing range provenance engine. It is
 navigation context only: it does not add a provenance domain or infer
 historical identity, rename continuity, semantic identity, or symbol origin.
 
@@ -81,10 +81,23 @@ declarations. A class participates in method qualification; nested functions
 inherit the enclosing named chain. `getStart(sourceFile, false)` and
 `node.end` are the only declaration boundaries. The resulting inclusive lines
 are calculated from `lineOf(start) + 1` through `lineOf(end - 1) + 1`, with
-defensive handling for empty/invalid ends. Leading trivia/JSDoc and trailing
-comments are excluded; decorators, modifiers, signatures, bodies, closing
+defensive handling for empty/invalid ends. This produces the smallest
+declaration-covering line span:
+
+```text
+exact current-worktree AST declaration
+        ↓
+minimal inclusive covering line span
+        ↓
+existing line-granular range provenance
+```
+
+Leading trivia/JSDoc and trailing comments on separate lines outside the AST
+declaration are excluded. Decorators, modifiers, signatures, bodies, closing
 braces, semicolons, and physically interior comments are included naturally by
-the AST range.
+the AST range. Trivia or unrelated syntax sharing the first or last resolved
+line is included because the existing provenance unit is a complete line; the
+result is not a character-exclusive provenance range.
 
 Overload families are grouped syntactically only. A contiguous sibling run
 groups when declaration kind/name/container/staticness match, every preceding
@@ -115,17 +128,18 @@ ancestry, Codex preparation/projection, the 24 committed-group bound, report
 assembly, final stability verification, privacy, and all existing evidence
 semantics. A symbol coordinator discovers the repository, resolves one source
 snapshot, resolves the selector, checks the 200-line limit, constructs the
-same-snapshot range location, and invokes the core exactly once. A successful
-symbol report is evidence-equivalent to querying the same explicit range over
-the same source state.
+same-snapshot declaration-covering line span, and invokes the core exactly
+once. A successful symbol report is evidence-equivalent to querying the same
+explicit line range over the same source state.
 
 Range summary/details sections are reused through a narrow header/context
 seam. Symbol summary output begins with the repository path and qualified name,
 kind, and lines. Details adds bounded current-worktree resolver metadata:
 language, dialect, parser/version, selector, qualified name, resolved range,
-complete-declaration boundary, and the limitation that no historical symbol
-identity is inferred. No AST dump, source excerpt, compiler diagnostic body,
-historical identity, rename, or symbol-origin wording is rendered.
+declaration-covering line span boundary, and the limitations that provenance
+is line-granular and no historical symbol identity is inferred. No AST dump,
+source excerpt, compiler diagnostic body, historical identity, rename, or
+symbol-origin wording is rendered.
 
 ## Error mapping and testing
 

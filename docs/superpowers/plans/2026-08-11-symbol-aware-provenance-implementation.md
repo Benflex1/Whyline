@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add exact file-scoped TypeScript/JavaScript symbol queries that resolve one current-worktree declaration range and reuse Whyline’s existing range provenance evidence unchanged.
+**Goal:** Add exact file-scoped TypeScript/JavaScript symbol queries that resolve one current-worktree declaration-covering line span and reuse Whyline’s existing range provenance evidence unchanged.
 
 **Architecture:** Introduce a discriminated CLI query model and a single-read current-source snapshot seam. A lazy TypeScript 5.9 syntax-only resolver collects supported declarations, applies exact Unicode-safe selector matching, syntactic overload grouping, and deterministic ambiguity handling, then constructs a `ResolvedRangeCodeLocation` from the same snapshot. Refactor range provenance into an exported `analyzeResolvedRange` core; symbol orchestration and symbol renderers wrap that core without adding a provenance domain.
 
@@ -16,7 +16,7 @@
 - Any syntactic diagnostic anywhere in the current file is exit 2 with one bounded first-location message; parser load or runtime failure is exit 3.
 - Selector validation rejects only empty selectors, leading/trailing dots, and empty components; Unicode selector components remain valid and matching is exact parser-produced name equality.
 - Public symbol kinds are function, method, constructor, class, interface, type, and enum; unsupported declarations remain absent.
-- Use `node.getStart(sourceFile, false)` and `node.end`, convert to one-based inclusive lines, and retain AST boundaries without manual trivia expansion.
+- Use `node.getStart(sourceFile, false)` and `node.end` to identify the AST declaration, then project it to the smallest declaration-covering line span with one-based inclusive lines and no manual trivia expansion. Provenance remains line-granular.
 - Group overloads only by the frozen contiguous syntax-only rules; never use a type checker, symbol identity, signatures, or semantic resolution.
 - A resolved symbol range over 200 inclusive lines fails before blame, commit inspection, ancestry, or Codex analysis; reuse `MAX_RANGE_LINES`.
 - The parser and range engine consume one authoritative current-file snapshot; final existing HEAD/branch/file/status stability verification remains in the shared core.
@@ -86,7 +86,7 @@
 - `selectSymbol(candidates, selector, path)` performs exact simple-vs-qualified matching, throws bounded ambiguity/not-found errors, and reports up to 12 sorted candidates with exact omitted count.
 
 - [ ] **Step 1: Write failing declaration tests** for named functions, named default functions, classes, named default classes, decorated declarations, methods, constructors, interfaces, type aliases, enums, direct const arrows/function expressions, modifiers, generics, multiline signatures, nested functions/methods, CRLF/BOM/missing-final-newline, Unicode identifiers, and comment/trivia boundaries.
-- [ ] **Step 2: Assert exact boundaries**: JSDoc/leading trivia excluded, decorators/modifiers included, closing braces/terminating semicolons included, comments inside nodes naturally retained, and trailing comments after `node.end` excluded. Use `node.getStart(sourceFile, false)` and `node.end` with inclusive `end - 1` line conversion.
+- [ ] **Step 2: Assert declaration-covering line spans**: separate-line JSDoc/leading trivia and trailing comments remain outside the span; decorators/modifiers, closing braces/terminating semicolons, and comments inside nodes are retained; same-line material is necessarily included by line-granular provenance. Use `node.getStart(sourceFile, false)` and `node.end` with inclusive `end - 1` line conversion.
 - [ ] **Step 3: Write failing unsupported-form tests** for anonymous defaults, let/var function values, multi-declarators, destructuring, object methods, getters/setters, fields, private/computed/string/numeric methods, interface members/call signatures, enum members, class expressions, namespaces, imports/exports as symbols, non-function variables, properties, and labels.
 - [ ] **Step 4: Implement the AST visitor** using public `ts.is*` guards. Add candidates for named function/class/interface/type/enum declarations, identifier-named ordinary methods and constructors, and one-declarator const variables whose initializer is an arrow/function expression. Treat the const binding as the name and do not emit an internal function-expression name.
 - [ ] **Step 5: Implement qualification** as the dot-joined chain of enclosing queryable named declarations. Include classes and methods in the chain; allow nested named functions to produce forms such as `outer.inner` and `Parser.parseToken.decode`.
@@ -131,7 +131,7 @@
 
 - [ ] **Step 1: Write failing orchestration tests** for committed, mixed committed/uncommitted, untracked, Unicode path, symbol-derived vs explicit-range evidence, no Codex for uncommitted groups, exact ancestry unchanged, and final source mutation returning exit 3.
 - [ ] **Step 2: Implement `analyzeSymbol`** with `resolveCurrentSource`, lazy syntax resolution, ambiguity/not-found/error mapping, 200-line early rejection, `ResolvedRangeCodeLocation` construction from the same decoded text/snapshot, and one `analyzeResolvedRange` call.
-- [ ] **Step 3: Add failing renderer tests** for the concise header (`path — qualifiedName`, kind/lines), details resolver metadata (language, dialect, TypeScript 5.9.3, selector, qualified name, range, complete declaration boundary, no historical identity), ambiguity/syntax/over-limit error sanitization, Unicode names/paths, and no AST/source/compiler diagnostic leakage.
+- [ ] **Step 3: Add failing renderer tests** for the concise header (`path — qualifiedName`, kind/lines), details resolver metadata (language, dialect, TypeScript 5.9.3, selector, qualified name, range, declaration-covering line span boundary, line-granular provenance limitation, no historical identity), ambiguity/syntax/over-limit error sanitization, Unicode names/paths, and no AST/source/compiler diagnostic leakage.
 - [ ] **Step 4: Factor range renderer sections** into internal functions accepting a first-header/context prefix. Keep the normal `renderRangeSummary` and `renderRangeDetails` output unchanged; symbol renderers add only the symbol header and bounded resolution section before the existing sections.
 - [ ] **Step 5: Dispatch CLI symbol queries** in `main.ts` to `analyzeSymbol` and the symbol renderers; leave location query dispatch unchanged. Run `npm run build && node --test dist/test/symbol-provenance.test.js dist/test/symbol-render.test.js dist/test/cli.test.js`.
 - [ ] **Step 6: Commit** `git add src/provenance/explain-symbol.ts src/cli/main.ts src/cli/render-symbol-summary.ts src/cli/render-symbol-details.ts test/symbol-provenance.test.ts test/symbol-render.test.ts && git commit -m "feat: analyze and render symbol provenance"`.

@@ -21,6 +21,6 @@ export interface SymbolResolution {
   readonly qualifiedName: string;
   readonly startLine: number;
   readonly endLine: number;
-  readonly boundary: "complete declaration";
+  readonly boundary: "declaration-covering line span";
   readonly declarationForm?: "const-function";
 }

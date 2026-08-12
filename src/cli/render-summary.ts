@@ -21,6 +21,8 @@ function renderAncestrySummary(ancestry: GitAncestryResult | undefined): string[
       ];
     case "uncertain":
       return ["  Git ancestry: uncertain; Git suggested movement but exact verification was insufficient"];
+    case "transformed":
+      return ["  Git ancestry: verified direct-parent declaration correspondence; the queried line is not an exact ancestor match"];
     case "none":
       return ["  Git ancestry: not established; the textual commit may be origin or transformation"];
     case "unavailable":

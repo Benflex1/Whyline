@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import type { CurrentSourceSnapshot } from "../src/location/resolve-location.js";
+import { parseDeclarationIndex } from "../src/symbol/declaration-index.js";
 import { resolveTypeScriptSymbol } from "../src/symbol/typescript-resolver.js";
 
 function source(repositoryPath: string, text: string): CurrentSourceSnapshot {
@@ -201,4 +202,45 @@ test("does not reinterpret unsupported declaration forms", async () => {
       selector,
     );
   }
+});
+
+test("parses historical TypeScript-family text into reusable declaration facts", async () => {
+  for (const [repositoryPath, expectedDialect] of [
+    ["src/history.ts", "ts"],
+    ["src/history.tsx", "tsx"],
+    ["src/history.js", "js"],
+    ["src/history.jsx", "jsx"],
+  ] as const) {
+    const index = await parseDeclarationIndex(
+      repositoryPath,
+      "class Parser { parseToken() { return 1; } }\nfunction 解析() {}\n",
+    );
+    assert.equal(index.dialect, expectedDialect, repositoryPath);
+    assert.ok(index.declarations.some((declaration) => declaration.qualifiedName === "Parser.parseToken"));
+    assert.ok(index.declarations.some((declaration) => declaration.qualifiedName === "解析"));
+    assert.equal(index.declarations.some((declaration) => "node" in declaration), false);
+  }
+});
+
+test("historical declaration parsing retains duplicate keys without selecting one", async () => {
+  const index = await parseDeclarationIndex(
+    "src/history.ts",
+    "function parseToken() {}\nfunction parseToken() {}\n",
+  );
+  assert.equal(index.declarations.filter((declaration) => declaration.qualifiedName === "parseToken").length, 2);
+});
+
+test("historical declaration syntax errors are rejected without recovered facts", async () => {
+  await assert.rejects(
+    parseDeclarationIndex("src/history.ts", "function parseToken() {\nconst broken = ;\n"),
+    (error: unknown) => error instanceof Error && /syntax errors/.test(error.message),
+  );
+});
+
+test("historical declaration facts are bounded at 512 supported declarations", async () => {
+  const sourceText = Array.from({ length: 513 }, (_value, index) => `function parseToken${index}() {}`).join("\n");
+  await assert.rejects(
+    parseDeclarationIndex("src/history.ts", sourceText, { maxDeclarations: 512 }),
+    (error: unknown) => error instanceof Error && /512/.test(error.message),
+  );
 });

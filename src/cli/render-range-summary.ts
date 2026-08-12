@@ -40,6 +40,8 @@ function renderAncestrySegment(segment: RangeAncestrySegment): string {
         + ":" + (segment.ancestor?.line ?? "?")
         + " " + shortCommit(segment.ancestor?.commitId ?? "")
         + " \"" + sanitizeTerminalText(segment.ancestorSubject ?? "") + "\"";
+    case "transformed":
+      return "    " + span + "  verified direct-parent declaration correspondence";
     case "uncertain":
       return "    " + span + "  uncertain; exact ancestry not established";
     case "none":

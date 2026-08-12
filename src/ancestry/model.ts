@@ -1,5 +1,6 @@
 export type GitAncestryStatus =
   | "exact"
+  | "transformed"
   | "uncertain"
   | "none"
   | "unavailable";
@@ -29,6 +30,26 @@ export interface ExactBlockInput {
   readonly ancestorComplete: boolean;
 }
 
+export interface PreservedAnchorProof {
+  readonly basis: "derived";
+  readonly childStartLine: number;
+  readonly parentStartLine: number;
+  readonly matchedLineCount: number;
+  readonly distinctiveLineCount: number;
+  readonly alphanumericCount: number;
+  readonly comparison: "exact-lines";
+}
+
+export interface DeclarationHunkProof {
+  readonly basis: "derived";
+  readonly queriedChildLine: number;
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly connection: "parent-overlap" | "insertion-within-parent";
+}
+
 export interface GitLineAncestor {
   readonly commitId: string;
   readonly path: string;
@@ -43,6 +64,20 @@ export type GitAncestryResult =
       readonly ancestor: GitLineAncestor;
       readonly ancestorSubject: string;
       readonly proof: ExactBlockProof;
+      readonly limitations: readonly string[];
+    }
+  | {
+      readonly status: "transformed";
+      readonly relationship: "direct-parent-declaration";
+      readonly textualCommitId: string;
+      readonly parentCommitId: string;
+      readonly childPath: string;
+      readonly parentPath: string;
+      readonly childDeclaration: import("../symbol/model.js").DeclarationDescriptor;
+      readonly parentDeclaration: import("../symbol/model.js").DeclarationDescriptor;
+      readonly parentSelectionEvidence: "blame-previous" | "sole-parent";
+      readonly hunk: DeclarationHunkProof;
+      readonly anchor: PreservedAnchorProof;
       readonly limitations: readonly string[];
     }
   | {

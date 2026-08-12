@@ -2,6 +2,7 @@ import { TextDecoder } from "node:util";
 
 import { proveExactBlock } from "../ancestry/exact-block-proof.js";
 import type {
+  GitAncestryResult,
   ExactBlockProof,
   ExactTransitionKind,
 } from "../ancestry/model.js";
@@ -20,6 +21,11 @@ import type {
 import { OperationalError } from "../whyline-error.js";
 import { decodeGitUtf8, type GitResult, type GitRunner } from "./git-process.js";
 import { parseBlamePorcelainRange } from "./blame-range.js";
+import {
+  createDeclarationCorrespondenceTraceCache,
+  traceDeclarationCorrespondenceLine,
+  type DeclarationCorrespondenceTraceCache,
+} from "./trace-declaration-correspondence.js";
 
 const GIT_OBJECT_ID = /^[0-9a-fA-F]{7,128}$/;
 
@@ -49,6 +55,7 @@ export interface RangeAncestryTraceCache {
   readonly reachability: Map<string, Promise<"yes" | "no" | "unavailable">>;
   readonly blob: Map<string, Promise<{ readonly material: BlobMaterial } | { readonly failure: RangeAncestryMaterialFailure }>>;
   readonly subject: Map<string, Promise<string | null>>;
+  readonly correspondence: DeclarationCorrespondenceTraceCache;
 }
 
 export function createRangeAncestryTraceCache(): RangeAncestryTraceCache {
@@ -56,6 +63,7 @@ export function createRangeAncestryTraceCache(): RangeAncestryTraceCache {
     reachability: new Map(),
     blob: new Map(),
     subject: new Map(),
+    correspondence: createDeclarationCorrespondenceTraceCache(),
   };
 }
 
@@ -70,6 +78,7 @@ interface LineOutcome {
   readonly ancestorSubject?: string | undefined;
   readonly transition?: ExactTransitionKind | undefined;
   readonly proof?: ExactBlockProof | undefined;
+  readonly transformed?: Extract<GitAncestryResult, { readonly status: "transformed" }> | undefined;
   readonly limitations: readonly string[];
 }
 
@@ -305,6 +314,19 @@ function makeCoverage(
       ...(outcome.ancestorSubject === undefined ? {} : { ancestorSubject: outcome.ancestorSubject }),
       ...(outcome.transition === undefined ? {} : { transition: outcome.transition }),
       ...(outcome.proof === undefined ? {} : { proof: outcome.proof }),
+      ...(outcome.transformed === undefined ? {} : {
+        transformed: {
+          textualCommitId: outcome.transformed.textualCommitId,
+          parentCommitId: outcome.transformed.parentCommitId,
+          childPath: outcome.transformed.childPath,
+          parentPath: outcome.transformed.parentPath,
+          childDeclaration: outcome.transformed.childDeclaration,
+          parentDeclaration: outcome.transformed.parentDeclaration,
+          parentSelectionEvidence: outcome.transformed.parentSelectionEvidence,
+          hunk: outcome.transformed.hunk,
+          anchor: outcome.transformed.anchor,
+        },
+      }),
       limitations: outcome.limitations,
     });
     active = null;
@@ -600,39 +622,75 @@ export async function traceRangeGroupAncestry(
     }
   }
   const runs = candidateRuns(movement, sourceToFacts, group.commit.id);
-  if (runs.length === 0) return makeCoverage(group, outcomes);
-
-  const currentKey = group.commit.id + "\u0000" + group.blamedPath;
-  let currentMaterialPromise = cache.blob.get(currentKey);
-  if (currentMaterialPromise === undefined) {
-    currentMaterialPromise = resolveBlob(runner, context, group.commit.id, group.blamedPath);
-    cache.blob.set(currentKey, currentMaterialPromise);
-  }
-  const currentMaterialResult = await currentMaterialPromise;
-  if ("failure" in currentMaterialResult) {
-    const message = currentMaterialResult.failure === "missing-history"
-      ? "The textual commit blob was unavailable because history is incomplete."
-      : "The textual commit blob required for exact ancestry was unavailable.";
-    for (const fact of group.lines) {
-      outcomes.set(fact.queryLine, makeUnavailableOutcome("unavailable", message));
+  if (runs.length > 0) {
+    const currentKey = group.commit.id + "\u0000" + group.blamedPath;
+    let currentMaterialPromise = cache.blob.get(currentKey);
+    if (currentMaterialPromise === undefined) {
+      currentMaterialPromise = resolveBlob(runner, context, group.commit.id, group.blamedPath);
+      cache.blob.set(currentKey, currentMaterialPromise);
     }
-    return makeCoverage(group, outcomes);
+    const currentMaterialResult = await currentMaterialPromise;
+    if ("failure" in currentMaterialResult) {
+      const message = currentMaterialResult.failure === "missing-history"
+        ? "The textual commit blob was unavailable because history is incomplete."
+        : "The textual commit blob required for exact ancestry was unavailable.";
+      for (const fact of group.lines) {
+        outcomes.set(fact.queryLine, makeUnavailableOutcome("unavailable", message));
+      }
+      return makeCoverage(group, outcomes);
+    }
+
+    for (const run of runs) {
+      await analyzeRun(
+        runner,
+        context,
+        location,
+        group,
+        run,
+        sourceToFacts,
+        currentMaterialResult.material,
+        cache.reachability,
+        cache.blob,
+        cache.subject,
+        outcomes,
+      );
+    }
   }
 
-  for (const run of runs) {
-    await analyzeRun(
+  for (const fact of [...group.lines].sort((left, right) => left.queryLine - right.queryLine)) {
+    const existing = outcomes.get(fact.queryLine);
+    if (existing?.status !== "none" || group.parent?.kind !== "commit" || group.commit === null) continue;
+    const transformed = await traceDeclarationCorrespondenceLine(
       runner,
       context,
-      location,
-      group,
-      run,
-      sourceToFacts,
-      currentMaterialResult.material,
-      cache.reachability,
-      cache.blob,
-      cache.subject,
-      outcomes,
+      {
+        textualCommit: group.commit,
+        parent: group.parent,
+        blame: fact.blame,
+        changedPaths: group.changedPaths,
+        relevantHunks: group.relevantHunks,
+        childLine: fact.blame.originalLine,
+      },
+      cache.correspondence,
     );
+    if (transformed === null) continue;
+    if (transformed.status === "transformed") {
+      outcomes.set(fact.queryLine, {
+        status: "transformed",
+        transformed,
+        limitations: transformed.limitations,
+      });
+    } else if (transformed.status === "uncertain") {
+      outcomes.set(fact.queryLine, {
+        status: "uncertain",
+        limitations: transformed.limitations,
+      });
+    } else {
+      outcomes.set(fact.queryLine, {
+        status: "unavailable",
+        limitations: transformed.limitations,
+      });
+    }
   }
   return makeCoverage(group, outcomes);
 }

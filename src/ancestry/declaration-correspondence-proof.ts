@@ -87,6 +87,26 @@ function containsLine(value: DeclarationFact, line: number): boolean {
   return value.span.startLine <= line && line <= value.span.endLine;
 }
 
+export function declarationAttemptIdentity(
+  declarations: readonly DeclarationFact[],
+  queriedChildLine: number,
+): string {
+  const covering = declarations.filter((value) => containsLine(value, queriedChildLine));
+  if (covering.length === 0) return "none:" + queriedChildLine;
+  const smallest = Math.min(...covering.map(spanLength));
+  const innermost = covering.filter((value) => spanLength(value) === smallest);
+  if (innermost.length !== 1) return "ambiguous:" + queriedChildLine;
+  const value = innermost[0] as DeclarationFact;
+  return [
+    value.span.startLine,
+    value.span.endLine,
+    value.kind,
+    value.qualifiedName,
+    value.declarationForm,
+    String(value.staticStatus),
+  ].join(":");
+}
+
 function descriptor(value: DeclarationFact): DeclarationDescriptor {
   return {
     kind: value.kind,

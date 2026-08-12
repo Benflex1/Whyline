@@ -18,6 +18,7 @@ import {
   type GitRunner,
 } from "./git-process.js";
 import { OperationalError } from "../whyline-error.js";
+import { traceDeclarationCorrespondence } from "./trace-declaration-correspondence.js";
 
 const GIT_OBJECT_ID = /^[0-9a-fA-F]{7,128}$/;
 const MAX_SUBJECT_LENGTH = 240;
@@ -270,7 +271,7 @@ function exactResult(
   };
 }
 
-export async function traceLineAncestry(
+async function traceExactLineAncestry(
   runner: GitRunner,
   context: RepositoryContext,
   location: ResolvedCodeLocation,
@@ -394,4 +395,16 @@ export async function traceLineAncestry(
     proof,
     subject,
   );
+}
+
+export async function traceLineAncestry(
+  runner: GitRunner,
+  context: RepositoryContext,
+  location: ResolvedCodeLocation,
+  provenance: GitProvenance,
+): Promise<GitAncestryResult> {
+  const exact = await traceExactLineAncestry(runner, context, location, provenance);
+  if (exact.status !== "none") return exact;
+  const transformed = await traceDeclarationCorrespondence(runner, context, provenance);
+  return transformed ?? exact;
 }

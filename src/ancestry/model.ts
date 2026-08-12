@@ -85,7 +85,9 @@ export type GitAncestryResult =
       readonly reason:
         | "insufficient-distinctive-context"
         | "candidate-not-exact"
-        | "ambiguous-exact-source";
+        | "ambiguous-exact-source"
+        | "insufficient-declaration-correspondence"
+        | "ambiguous-declaration-correspondence";
       readonly candidate?: GitLineAncestor;
       readonly limitations: readonly string[];
     }
@@ -101,7 +103,8 @@ export type GitAncestryResult =
       readonly reason:
         | "ambiguous-parent"
         | "missing-history"
-        | "unsupported-object";
+        | "unsupported-object"
+        | "work-bound";
       readonly candidate?: GitLineAncestor;
       readonly limitations: readonly string[];
     };

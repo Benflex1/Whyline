@@ -18,7 +18,7 @@ import type {
 } from "../provenance/model.js";
 import { InvalidInputError, OperationalError } from "../whyline-error.js";
 import type { ParsedLocation } from "./parse-location.js";
-import type { RangeLocationQuery } from "./parse-location.js";
+import { MAX_RANGE_LINES, type RangeLocationQuery } from "./parse-location.js";
 
 const MAX_RETAINED_LINE_LENGTH = 4096;
 
@@ -144,6 +144,76 @@ function sameSnapshot(left: FileSnapshot, right: FileSnapshot): boolean {
     && left.digest === right.digest;
 }
 
+export interface CurrentSourceSnapshot {
+  readonly absolutePath: string;
+  readonly repositoryPath: string;
+  readonly text: string;
+  readonly lines: readonly string[];
+  readonly fileSnapshot: FileSnapshot;
+  readonly targetState: TargetStatus["state"];
+  readonly targetDirty: boolean;
+}
+
+export async function resolveCurrentSource(
+  file: string,
+  context: RepositoryContext,
+  runner: GitRunner,
+  currentDirectory: string,
+): Promise<CurrentSourceSnapshot> {
+  const candidatePath = path.isAbsolute(file)
+    ? path.normalize(file)
+    : path.resolve(currentDirectory, file);
+  const canonicalPath = await resolveCanonicalPath(context, candidatePath, runner);
+  const repositoryPath = repositoryPathFor(context.worktreeRoot, canonicalPath);
+  const source = await readSnapshot(canonicalPath);
+  const text = decodeText(source.bytes);
+  const lines = splitTextLines(text);
+  const status = await readTargetStatus(runner, context, repositoryPath);
+  return {
+    absolutePath: canonicalPath,
+    repositoryPath,
+    text,
+    lines,
+    fileSnapshot: source.snapshot,
+    targetState: status.state,
+    targetDirty: status.dirty,
+  };
+}
+
+export function resolvedRangeLocationFromSource(
+  parsed: RangeLocationQuery,
+  source: CurrentSourceSnapshot,
+): ResolvedRangeCodeLocation {
+  const lineCount = parsed.endLine - parsed.startLine + 1;
+  if (lineCount > MAX_RANGE_LINES) {
+    throw new InvalidInputError("range cannot exceed " + MAX_RANGE_LINES + " lines");
+  }
+  const first = source.lines[parsed.startLine - 1];
+  const last = source.lines[parsed.endLine - 1];
+  if (first === undefined || last === undefined) {
+    throw new InvalidInputError("range endpoint is beyond end of file");
+  }
+
+  const lineContents = source.lines
+    .slice(parsed.startLine - 1, parsed.endLine)
+    .map(safeLineContent);
+  const lineDigests = source.lines
+    .slice(parsed.startLine - 1, parsed.endLine)
+    .map((line) => digest(Buffer.from(line, "utf8")));
+  return {
+    input: parsed.input,
+    absolutePath: source.absolutePath,
+    repositoryPath: source.repositoryPath,
+    startLine: parsed.startLine,
+    endLine: parsed.endLine,
+    lineContents,
+    lineDigests,
+    fileSnapshot: source.fileSnapshot,
+    targetState: source.targetState,
+    targetDirty: source.targetDirty,
+  };
+}
+
 export function snapshotsEqual(left: FileSnapshot, right: FileSnapshot): boolean {
   return sameSnapshot(left, right);
 }
@@ -154,30 +224,21 @@ export async function resolveLocation(
   runner: GitRunner,
   currentDirectory: string,
 ): Promise<ResolvedCodeLocation> {
-  const candidatePath = path.isAbsolute(parsed.file)
-    ? path.normalize(parsed.file)
-    : path.resolve(currentDirectory, parsed.file);
-  const canonicalPath = await resolveCanonicalPath(context, candidatePath, runner);
-  const repositoryPath = repositoryPathFor(context.worktreeRoot, canonicalPath);
-  const file = await readSnapshot(canonicalPath);
-  const text = decodeText(file.bytes);
-  const lines = splitTextLines(text);
-  const lineContent = lines[parsed.line - 1];
+  const source = await resolveCurrentSource(parsed.file, context, runner, currentDirectory);
+  const lineContent = source.lines[parsed.line - 1];
   if (lineContent === undefined) {
     throw new InvalidInputError("line is beyond end of file");
   }
-
-  const status: TargetStatus = await readTargetStatus(runner, context, repositoryPath);
   return {
     input: parsed.input,
-    absolutePath: canonicalPath,
-    repositoryPath,
+    absolutePath: source.absolutePath,
+    repositoryPath: source.repositoryPath,
     requestedLine: parsed.line,
     lineContent: safeLineContent(lineContent),
     lineDigest: digest(Buffer.from(lineContent, "utf8")),
-    fileSnapshot: file.snapshot,
-    targetState: status.state,
-    targetDirty: status.dirty,
+    fileSnapshot: source.fileSnapshot,
+    targetState: source.targetState,
+    targetDirty: source.targetDirty,
   };
 }
 
@@ -187,39 +248,8 @@ export async function resolveRangeLocation(
   runner: GitRunner,
   currentDirectory: string,
 ): Promise<ResolvedRangeCodeLocation> {
-  const candidatePath = path.isAbsolute(parsed.file)
-    ? path.normalize(parsed.file)
-    : path.resolve(currentDirectory, parsed.file);
-  const canonicalPath = await resolveCanonicalPath(context, candidatePath, runner);
-  const repositoryPath = repositoryPathFor(context.worktreeRoot, canonicalPath);
-  const file = await readSnapshot(canonicalPath);
-  const text = decodeText(file.bytes);
-  const lines = splitTextLines(text);
-  const first = lines[parsed.startLine - 1];
-  const last = lines[parsed.endLine - 1];
-  if (first === undefined || last === undefined) {
-    throw new InvalidInputError("range endpoint is beyond end of file");
-  }
-
-  const lineContents = lines
-    .slice(parsed.startLine - 1, parsed.endLine)
-    .map(safeLineContent);
-  const lineDigests = lines
-    .slice(parsed.startLine - 1, parsed.endLine)
-    .map((line) => digest(Buffer.from(line, "utf8")));
-  const status: TargetStatus = await readTargetStatus(runner, context, repositoryPath);
-  return {
-    input: parsed.input,
-    absolutePath: canonicalPath,
-    repositoryPath,
-    startLine: parsed.startLine,
-    endLine: parsed.endLine,
-    lineContents,
-    lineDigests,
-    fileSnapshot: file.snapshot,
-    targetState: status.state,
-    targetDirty: status.dirty,
-  };
+  const source = await resolveCurrentSource(parsed.file, context, runner, currentDirectory);
+  return resolvedRangeLocationFromSource(parsed, source);
 }
 
 export async function currentLocationSnapshot(

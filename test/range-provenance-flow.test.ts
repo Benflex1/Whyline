@@ -14,7 +14,10 @@ import type {
   AgentSummaryRelevanceScan,
 } from "../src/agents/agent-history-source.js";
 import { GitProcess, type GitRunner } from "../src/git/git-process.js";
-import { analyzeRange } from "../src/provenance/explain-range.js";
+import { discoverRepositoryContext } from "../src/git/repository-context.js";
+import { parseLocationQuery } from "../src/location/parse-location.js";
+import { resolveRangeLocation } from "../src/location/resolve-location.js";
+import { analyzeRange, analyzeResolvedRange } from "../src/provenance/explain-range.js";
 import type { WhylineRangeReport } from "../src/provenance/range-model.js";
 
 interface Fixture {
@@ -185,4 +188,30 @@ test("final range stability verification rejects target mutation", async (t) => 
     }),
     (error: unknown) => error instanceof Error && error.message === "repository changed during analysis",
   );
+});
+
+test("resolved range core is equivalent to the explicit range wrapper", async (t) => {
+  const fixture = await makeFixture(t);
+  const source = new EmptyHistorySource();
+  await writeTarget(fixture, ["const stable = true;", "const second = true;"]);
+  await runGit(fixture, ["add", "--", "src/flow.ts"]);
+  await runGit(fixture, ["commit", "--no-verify", "-m", "stable"]);
+
+  const input = "src/flow.ts:1-2";
+  const parsed = parseLocationQuery(input);
+  assert.equal(parsed.kind, "range");
+  if (parsed.kind !== "range") throw new Error("expected range query");
+  const repository = await discoverRepositoryContext(fixture.runner, fixture.directory);
+  const location = await resolveRangeLocation(parsed, repository, fixture.runner, fixture.directory);
+  const direct = await analyzeResolvedRange(repository, location, {
+    currentDirectory: fixture.directory,
+    git: fixture.runner,
+    agentHistorySource: source,
+  });
+  const wrapped = await analyzeRange(input, {
+    currentDirectory: fixture.directory,
+    git: fixture.runner,
+    agentHistorySource: source,
+  });
+  assert.deepEqual(direct, wrapped);
 });

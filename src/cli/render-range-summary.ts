@@ -65,10 +65,12 @@ function renderCorrelationResult(
   ];
 }
 
-export function renderRangeSummary(report: WhylineRangeReport): string {
+export function renderRangeSummaryWithHeader(
+  report: WhylineRangeReport,
+  header: string,
+): string {
   const lines = [
-    sanitizeTerminalText(report.location.repositoryPath) + ":"
-      + report.location.startLine + "-" + report.location.endLine,
+    header,
     "",
     "Explanation",
     "  Textual last-touch",
@@ -110,4 +112,12 @@ export function renderRangeSummary(report: WhylineRangeReport): string {
     lines.push(omission(report.textualGroups.length - MAX_RENDERED_GROUPS));
   }
   return lines.join("\n");
+}
+
+export function renderRangeSummary(report: WhylineRangeReport): string {
+  return renderRangeSummaryWithHeader(
+    report,
+    sanitizeTerminalText(report.location.repositoryPath) + ":"
+      + report.location.startLine + "-" + report.location.endLine,
+  );
 }

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { GitProcess } from "../src/git/git-process.js";
+import { GitProcess, type GitRunner } from "../src/git/git-process.js";
 import { traceLineAncestry } from "../src/git/trace-line-ancestry.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
 import type { WhylineReport } from "../src/provenance/model.js";
@@ -177,4 +177,128 @@ test("maps a transformed declaration through one directly observed Git rename", 
   assert.equal(result.parentCommitId, parent);
   assert.equal(result.childPath, targetPath);
   assert.equal(result.parentPath, sourcePath);
+});
+
+test("does not attempt transformed correspondence at a root or ambiguous parent", async (t) => {
+  const f = await fixture(t);
+  const repositoryPath = "src/parser.ts";
+  await writeFixtureFile(f, repositoryPath, parentDeclaration);
+  const root = await commitFixture(f, repositoryPath, "root parser declaration");
+  const rootReport = await analyze(f, repositoryPath, 4);
+  assert.equal(rootReport.provenance.commit?.id, root);
+  const rootResult = await traceLineAncestry(f.runner, rootReport.repository, rootReport.location, rootReport.provenance);
+  assert.equal(rootResult.status, "none");
+  if (rootResult.status !== "none") return;
+  assert.equal(rootResult.reason, "root-history-boundary");
+
+  const ambiguousResult = await traceLineAncestry(
+    f.runner,
+    rootReport.repository,
+    rootReport.location,
+    {
+      ...rootReport.provenance,
+      parent: { basis: "derived", kind: "ambiguous", parentIds: ["parent-a", "parent-b"] },
+    },
+  );
+  assert.equal(ambiguousResult.status, "unavailable");
+  if (ambiguousResult.status !== "unavailable") return;
+  assert.equal(ambiguousResult.reason, "ambiguous-parent");
+});
+
+test("historical syntax errors and unreadable blobs remain unavailable", async (t) => {
+  const f = await fixture(t);
+  const repositoryPath = "src/parser.ts";
+  await writeFixtureFile(f, repositoryPath, parentDeclaration);
+  await commitFixture(f, repositoryPath, "add parser declaration");
+  await writeFixtureFile(f, repositoryPath, [
+    parentDeclaration[0] as string,
+    parentDeclaration[1] as string,
+    parentDeclaration[2] as string,
+    "  const editedLine = input.toUpperCase();",
+    parentDeclaration[3] as string,
+    parentDeclaration[4] as string,
+  ]);
+  await commitFixture(f, repositoryPath, "edit parser declaration");
+  const validReport = await analyze(f, repositoryPath, 4);
+  const unreadableRunner: GitRunner = {
+    run: (args, options) => args[0] === "cat-file" && args[1] === "blob"
+      ? Promise.resolve({ stdout: Buffer.from([0xff, 0xfe]), stderr: Buffer.alloc(0), exitCode: 0, signal: null })
+      : f.runner.run(args, options),
+  };
+  const unreadableResult = await traceLineAncestry(unreadableRunner, validReport.repository, validReport.location, validReport.provenance);
+  assert.equal(unreadableResult.status, "unavailable");
+  if (unreadableResult.status !== "unavailable") return;
+  assert.equal(unreadableResult.reason, "unsupported-object");
+
+  await writeFixtureFile(f, repositoryPath, [
+    parentDeclaration[0] as string,
+    parentDeclaration[1] as string,
+    parentDeclaration[2] as string,
+    "  const broken = ;",
+    parentDeclaration[3] as string,
+    parentDeclaration[4] as string,
+  ]);
+  await commitFixture(f, repositoryPath, "write invalid parser declaration");
+  const report = await analyze(f, repositoryPath, 4);
+  const syntaxResult = await traceLineAncestry(f.runner, report.repository, report.location, report.provenance);
+  assert.equal(syntaxResult.status, "unavailable");
+  if (syntaxResult.status !== "unavailable") return;
+  assert.equal(syntaxResult.reason, "unsupported-object");
+});
+
+test("enforces the historical blob bound before declaration parsing", async (t) => {
+  const f = await fixture(t);
+  const repositoryPath = "src/parser.ts";
+  await writeFixtureFile(f, repositoryPath, parentDeclaration);
+  await commitFixture(f, repositoryPath, "add parser declaration");
+  await writeFixtureFile(f, repositoryPath, [
+    parentDeclaration[0] as string,
+    parentDeclaration[1] as string,
+    parentDeclaration[2] as string,
+    "  const editedLine = input.toUpperCase();",
+    parentDeclaration[3] as string,
+    parentDeclaration[4] as string,
+  ]);
+  await commitFixture(f, repositoryPath, "edit parser declaration");
+  const report = await analyze(f, repositoryPath, 4);
+  const oversizedRunner: GitRunner = {
+    run: (args, options) => args[0] === "cat-file" && args[1] === "blob"
+      ? Promise.resolve({ stdout: Buffer.alloc(2 * 1024 * 1024 + 1, 0x61), stderr: Buffer.alloc(0), exitCode: 0, signal: null })
+      : f.runner.run(args, options),
+  };
+  const result = await traceLineAncestry(oversizedRunner, report.repository, report.location, report.provenance);
+  assert.equal(result.status, "unavailable");
+  if (result.status !== "unavailable") return;
+  assert.equal(result.reason, "work-bound");
+});
+
+test("keeps transformed historical loading argv-safe for leading-dash paths", async (t) => {
+  const f = await fixture(t);
+  const repositoryPath = "src/--parser.ts";
+  await writeFixtureFile(f, repositoryPath, parentDeclaration);
+  const parent = await commitFixture(f, repositoryPath, "add unusual parser path");
+  await writeFixtureFile(f, repositoryPath, [
+    parentDeclaration[0] as string,
+    parentDeclaration[1] as string,
+    parentDeclaration[2] as string,
+    "  const editedLine = input.toUpperCase();",
+    parentDeclaration[3] as string,
+    parentDeclaration[4] as string,
+  ]);
+  const textual = await commitFixture(f, repositoryPath, "edit unusual parser path");
+  const report = await analyze(f, repositoryPath, 4);
+  const calls: string[][] = [];
+  const recordingRunner: GitRunner = {
+    run: (args, options) => {
+      calls.push([...args]);
+      return f.runner.run(args, options);
+    },
+  };
+  const result = await traceLineAncestry(recordingRunner, report.repository, report.location, report.provenance);
+  assert.equal(result.status, "transformed");
+  if (result.status !== "transformed") return;
+  assert.equal(result.textualCommitId, textual);
+  assert.equal(result.parentCommitId, parent);
+  assert.ok(calls.some((args) => args[0] === "ls-tree" && args.includes("--") && args.includes(repositoryPath)));
+  assert.equal(calls.some((args) => args.includes("--parser.ts") && args[0] !== "ls-tree"), false);
 });

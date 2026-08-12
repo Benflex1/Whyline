@@ -234,6 +234,71 @@ test("renders mixed range evidence without collapsing domains", () => {
   assert.doesNotMatch(output, /private\/transcript|private evidence id|private body/);
 });
 
+test("renders transformed range segments with line-specific bounded evidence", () => {
+  const first = group("textual-1", 40, 42, commit("9f2ab41abcdef", "edit parser"));
+  const coverage: RangeAncestryCoverage = {
+    segments: [{
+      span: { startLine: 42, endLine: 42 },
+      status: "transformed",
+      transformed: {
+        textualCommitId: "9f2ab41abcdef",
+        parentCommitId: parentId,
+        childPath: "src/parser.ts",
+        parentPath: "src/legacy-parser.ts",
+        childDeclaration: {
+          kind: "method",
+          qualifiedName: "Parser.parseToken",
+          declarationForm: "declaration",
+          staticStatus: false,
+          span: { startLine: 40, endLine: 48 },
+        },
+        parentDeclaration: {
+          kind: "method",
+          qualifiedName: "Parser.parseToken",
+          declarationForm: "declaration",
+          staticStatus: false,
+          span: { startLine: 18, endLine: 26 },
+        },
+        parentSelectionEvidence: "sole-parent",
+        hunk: {
+          basis: "derived",
+          queriedChildLine: 42,
+          oldStart: 18,
+          oldLines: 9,
+          newStart: 40,
+          newLines: 10,
+          connection: "parent-overlap",
+        },
+        anchor: {
+          basis: "derived",
+          childStartLine: 40,
+          parentStartLine: 18,
+          matchedLineCount: 6,
+          distinctiveLineCount: 3,
+          alphanumericCount: 132,
+          comparison: "exact-lines",
+        },
+      },
+      limitations: ["the queried line itself is not an exact ancestor match"],
+    }],
+    limitations: ["the queried line itself is not an exact ancestor match"],
+  };
+  const output = renderRangeSummary(report(
+    [first],
+    new Map([[first.id, coverage]]),
+    [],
+  ));
+  assert.match(output, /Git ancestry/);
+  assert.match(output, /verified direct-parent declaration correspondence/);
+  assert.match(output, /not an exact ancestor match/);
+  assert.doesNotMatch(output, /origin|same historical symbol|semantic equivalence/i);
+
+  const details = renderRangeDetails(report([first], new Map([[first.id, coverage]]), []));
+  assert.match(details, /relationship: direct-parent-declaration/);
+  assert.match(details, /syntactic key: kind=method/);
+  assert.match(details, /anchor: lines=6, distinctive=3, alphanumeric=132/);
+});
+
 test("details include forensic group evidence but not private transcript material", () => {
   const first = group("textual-1", 40, 47, commit("9f2ab41abcdef", "refactor: split parser"));
   const output = renderRangeDetails(report(
@@ -243,7 +308,7 @@ test("details include forensic group evidence but not private transcript materia
   ));
   assert.match(output, /Textual groups/);
   assert.match(output, /selected parent|parent/i);
-  assert.match(output, /Exact ancestry/);
+  assert.match(output, /Git ancestry/);
   assert.match(output, /proof/i);
   assert.match(output, /Codex/);
   assert.doesNotMatch(output, /private\/transcript|private evidence id|private body/);

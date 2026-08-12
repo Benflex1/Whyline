@@ -73,6 +73,49 @@ const exact: GitAncestryResult = {
   limitations: ["visible history only"],
 };
 
+const transformed: GitAncestryResult = {
+  status: "transformed",
+  relationship: "direct-parent-declaration",
+  textualCommitId: "9f2ab41abcdef",
+  parentCommitId: "31ca207abcdef",
+  childPath: "src/parser.ts",
+  parentPath: "src/legacy-parser.ts",
+  childDeclaration: {
+    kind: "method",
+    qualifiedName: "Parser.parseToken",
+    declarationForm: "declaration",
+    staticStatus: false,
+    span: { startLine: 40, endLine: 48 },
+  },
+  parentDeclaration: {
+    kind: "method",
+    qualifiedName: "Parser.parseToken",
+    declarationForm: "declaration",
+    staticStatus: false,
+    span: { startLine: 18, endLine: 26 },
+  },
+  parentSelectionEvidence: "sole-parent",
+  hunk: {
+    basis: "derived",
+    queriedChildLine: 42,
+    oldStart: 18,
+    oldLines: 9,
+    newStart: 40,
+    newLines: 10,
+    connection: "parent-overlap",
+  },
+  anchor: {
+    basis: "derived",
+    childStartLine: 40,
+    parentStartLine: 18,
+    matchedLineCount: 6,
+    distinctiveLineCount: 3,
+    alphanumericCount: 132,
+    comparison: "exact-lines",
+  },
+  limitations: ["queried line is not an exact ancestor match"],
+};
+
 function report(
   ancestry: GitAncestryResult | undefined,
   correlationResult: CorrelationResult | undefined,
@@ -170,6 +213,20 @@ test("default summary is concise, outcome-first, and exact-ancestry specific", (
   assert.equal(output.includes("original commit"), false);
   assert.equal(output.includes("/private"), false);
   assert.equal(output.length < 1200, true);
+});
+
+test("renders transformed ancestry as bounded correspondence without historical claims", () => {
+  const summary = renderSummary(report(transformed, undefined));
+  assert.match(summary, /verified parent correspondence/);
+  assert.match(summary, /Parser\.parseToken/);
+  assert.match(summary, /queried line itself is not an exact ancestor match/);
+  assert.doesNotMatch(summary, /same symbol|historical symbol|origin|semantic equivalence|authorship|move|copy/i);
+
+  const details = renderText(report(transformed, undefined));
+  assert.match(details, /relationship: direct-parent-declaration/);
+  assert.match(details, /syntactic key: kind=method/);
+  assert.match(details, /anchor: lines=6, distinctive=3, alphanumeric=132/);
+  assert.doesNotMatch(details, /source excerpt|AST|historical symbol|same historical|semantic equivalence/i);
 });
 
 test("none, uncertain, unavailable, and uncommitted summaries never claim origin", () => {

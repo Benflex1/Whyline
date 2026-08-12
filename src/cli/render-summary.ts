@@ -22,7 +22,17 @@ function renderAncestrySummary(ancestry: GitAncestryResult | undefined): string[
     case "uncertain":
       return ["  Git ancestry: uncertain; Git suggested movement but exact verification was insufficient"];
     case "transformed":
-      return ["  Git ancestry: verified direct-parent declaration correspondence; the queried line is not an exact ancestor match"];
+      return [
+        "  Git ancestry: edited declaration has a verified parent correspondence",
+        "    declaration: " + ancestry.childDeclaration.kind + " "
+          + sanitizeTerminalText(ancestry.childDeclaration.qualifiedName)
+          + " lines " + ancestry.childDeclaration.span.startLine + "-" + ancestry.childDeclaration.span.endLine,
+        "    parent: " + shortCommit(ancestry.parentCommitId) + " "
+          + sanitizeTerminalText(ancestry.parentPath) + ":"
+          + ancestry.parentDeclaration.span.startLine + "-" + ancestry.parentDeclaration.span.endLine,
+        "    evidence: target edit hunk + exact preserved declaration anchor",
+        "    limitation: the queried line itself is not an exact ancestor match",
+      ];
     case "none":
       return ["  Git ancestry: not established; the textual commit may be origin or transformation"];
     case "unavailable":

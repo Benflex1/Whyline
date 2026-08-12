@@ -109,7 +109,7 @@ test("disposable mixed-range CLI acceptance keeps textual, exact, and dirty span
     maxBuffer: 256 * 1024,
   });
   assert.match(details.stdout, /Textual groups/);
-  assert.match(details.stdout, /Exact ancestry/);
+  assert.match(details.stdout, /Git ancestry/);
   assert.match(details.stdout, /Codex provenance/);
   assert.match(details.stdout, /work-bound groups: 0/);
   assert.doesNotMatch(details.stdout, /\/private\/|private evidence|private body/i);

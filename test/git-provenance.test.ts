@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
@@ -494,7 +494,7 @@ test("linked worktrees and detached HEAD are represented in repository context",
   await gitChecked(f, ["worktree", "add", "--detach", linked, commit]);
 
   const linkedReport = await analyze(f, path.join(linked, "worktree.ts"), 1, { currentDirectory: linked });
-  assert.equal(linkedReport.repository.worktreeRoot, linked);
+  assert.equal(linkedReport.repository.worktreeRoot, await realpath(linked));
   assert.notEqual(linkedReport.repository.gitDir, linkedReport.repository.commonGitDir);
   assert.ok(linkedReport.repository.worktrees.length >= 2);
   assert.equal(linkedReport.repository.branch, null);

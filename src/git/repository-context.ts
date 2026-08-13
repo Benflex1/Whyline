@@ -94,6 +94,16 @@ function parseWorktreeRecord(tokens: readonly string[]): WorktreeInfo | null {
     : { path: worktreePath, headCommit, branch, detached, bare, locked, prunable };
 }
 
+async function canonicalizeWorktreePath(worktree: WorktreeInfo): Promise<WorktreeInfo> {
+  try {
+    return { ...worktree, path: await realpath(worktree.path) };
+  } catch {
+    // Prunable worktrees may no longer exist; retain their Git-reported path
+    // so deleted-worktree correlation can still use the bounded record.
+    return worktree;
+  }
+}
+
 export function parseWorktreeList(value: Buffer): WorktreeInfo[] {
   const tokens = decodeGitUtf8(value).split("\u0000");
   const records: WorktreeInfo[] = [];
@@ -215,6 +225,10 @@ export async function discoverRepositoryContext(
     "worktree mapping discovery",
   );
 
+  const worktrees = await Promise.all(
+    parseWorktreeList(worktreeResult.stdout).map(canonicalizeWorktreePath),
+  );
+
   return {
     worktreeRoot,
     gitDir,
@@ -223,7 +237,7 @@ export async function discoverRepositoryContext(
     isShallow: parseBooleanLine(isShallowResult.stdout, "shallow repository check"),
     headCommit: singleLine(headResult.stdout, "HEAD"),
     branch,
-    worktrees: parseWorktreeList(worktreeResult.stdout),
+    worktrees,
   };
 }
 

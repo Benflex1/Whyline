@@ -404,7 +404,7 @@ export async function traceLineAncestry(
   provenance: GitProvenance,
 ): Promise<GitAncestryResult> {
   const exact = await traceExactLineAncestry(runner, context, location, provenance);
-  if (exact.status !== "none") return exact;
+  if (exact.status !== "none" || provenance.parent?.kind !== "commit") return exact;
   const transformed = await traceDeclarationCorrespondence(runner, context, provenance);
   return transformed ?? exact;
 }

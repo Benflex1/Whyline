@@ -145,12 +145,15 @@ function newLineKind(hunk: GitHunk, targetLine: number): "added" | "context" | "
   return "absent";
 }
 
+type HunkProofResult = DeclarationHunkProof | null | "ambiguous" | "incomplete";
+
 function hunkProof(
   input: DeclarationCorrespondenceProofInput,
   child: DeclarationFact,
   parent: DeclarationFact,
-): DeclarationHunkProof | null | "ambiguous" {
+): HunkProofResult {
   const matches: DeclarationHunkProof[] = [];
+  let incomplete = false;
   for (const hunk of input.hunks) {
     if (newLineKind(hunk, input.queriedChildLine) !== "added") continue;
     const newEnd = hunk.newStart + Math.max(0, hunk.newLines - 1);
@@ -169,6 +172,10 @@ function hunkProof(
       }
     }
     if (connection !== null) {
+      if (hunk.truncated) {
+        incomplete = true;
+        continue;
+      }
       matches.push({
         basis: "derived",
         queriedChildLine: input.queriedChildLine,
@@ -180,6 +187,7 @@ function hunkProof(
       });
     }
   }
+  if (incomplete) return "incomplete";
   if (matches.length === 0) return null;
   if (matches.length > 1) return "ambiguous";
   return matches[0] as DeclarationHunkProof;
@@ -328,6 +336,9 @@ export function proveDeclarationCorrespondence(
   const hunk = hunkProof(input, child, parent);
   if (hunk === "ambiguous") {
     return uncertain("ambiguous-hunk", "More than one qualifying edit hunk connected the declaration pair.");
+  }
+  if (hunk === "incomplete") {
+    return unavailable("incomplete-material", "The qualifying edit hunk was truncated; declaration correspondence was not proven.");
   }
   if (hunk === null) {
     return uncertain("disconnected-hunk", "The queried added line and declaration regions were not connected by one edit hunk.");

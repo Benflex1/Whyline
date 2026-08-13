@@ -244,6 +244,19 @@ test("fails closed for incomplete material and exact ancestry", () => {
   assert.equal(proveDeclarationCorrespondence(input({ exactEstablished: true })).status, "uncertain");
 });
 
+test("fails closed when the qualifying edit hunk is truncated", () => {
+  const result = proveDeclarationCorrespondence(input({
+    hunks: [hunk(qualifyingHunk.lines.map((line) => ({
+      kind: line.kind === "metadata" ? "context" as const : line.kind,
+      text: line.text,
+    })), { truncated: true })],
+  }));
+
+  assert.equal(result.status, "unavailable");
+  if (result.status !== "unavailable") return;
+  assert.equal(result.reason, "incomplete-material");
+});
+
 test("does not participate for declarations over 200 lines", () => {
   const longLines = Array.from({ length: 201 }, (_, index) => "line " + index + " with declaration context");
   const result = proveDeclarationCorrespondence(input({

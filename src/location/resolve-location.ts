@@ -218,13 +218,10 @@ export function snapshotsEqual(left: FileSnapshot, right: FileSnapshot): boolean
   return sameSnapshot(left, right);
 }
 
-export async function resolveLocation(
+export function resolvedCodeLocationFromSource(
   parsed: ParsedLocation,
-  context: RepositoryContext,
-  runner: GitRunner,
-  currentDirectory: string,
-): Promise<ResolvedCodeLocation> {
-  const source = await resolveCurrentSource(parsed.file, context, runner, currentDirectory);
+  source: CurrentSourceSnapshot,
+): ResolvedCodeLocation {
   const lineContent = source.lines[parsed.line - 1];
   if (lineContent === undefined) {
     throw new InvalidInputError("line is beyond end of file");
@@ -240,6 +237,16 @@ export async function resolveLocation(
     targetState: source.targetState,
     targetDirty: source.targetDirty,
   };
+}
+
+export async function resolveLocation(
+  parsed: ParsedLocation,
+  context: RepositoryContext,
+  runner: GitRunner,
+  currentDirectory: string,
+): Promise<ResolvedCodeLocation> {
+  const source = await resolveCurrentSource(parsed.file, context, runner, currentDirectory);
+  return resolvedCodeLocationFromSource(parsed, source);
 }
 
 export async function resolveRangeLocation(

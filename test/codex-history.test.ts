@@ -312,7 +312,7 @@ test("successful T3 apply_patch exposes attempt, reported result, and bounded ch
   assert.equal(revisions.some((item) => item.commitReferenceKind === "produced-commit"), false);
   assert.ok(bundle.diagnostics.some((item) => item.kind === "compacted-history"));
   assert.ok(bundle.diagnostics.some((item) => item.kind === "context-compaction"));
-  assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|old|new|repository_url/);
+  assert.doesNotMatch(JSON.stringify(bundle), /synthetic patch output|synthetic tool output|repository_url|SECRET_RAW_PATCH_INPUT/);
 });
 
 test("malformed terminal with exec is limited durable evidence, never exec provenance", async (t) => {
@@ -399,7 +399,7 @@ test("failed patch and update/add/delete change payloads remain separate from su
     ["update", "add", "delete"],
   );
   assert.ok(result?.patch?.changes.every((change) => change.payloadRecovered));
-  assert.doesNotMatch(JSON.stringify(bundle), /SECRET_ADDED_SOURCE|SECRET_DELETED_SOURCE|old|new/);
+  assert.doesNotMatch(JSON.stringify(bundle), /SECRET_ADDED_SOURCE|SECRET_DELETED_SOURCE|"old"|"new"/);
 });
 
 test("structured patch evidence normalizes operation sides, ranges, truncation, and distinctiveness", async (t) => {
@@ -472,6 +472,9 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
   const update = changes[0];
   assert.equal(update?.matchSide, "added");
   assert.deepEqual(update?.hunkRanges, [{ oldStart: 10, oldLines: 2, newStart: 20, newLines: 4 }]);
+  assert.equal(update?.worktreeHunks?.length, 1);
+  assert.deepEqual(update?.worktreeHunks?.[0]?.orderedLineFingerprints, update?.matchLineFingerprints);
+  assert.equal(update?.worktreeHunks?.[0]?.matchSide, "added");
   assert.deepEqual(update?.matchLineFingerprints, [
     "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
     "f0201a8fbeb9c7e8240df84401f22f9509fa9aa16d6dc21f7505c7c678530623",
@@ -487,6 +490,9 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
   const added = changes[1];
   assert.equal(added?.matchSide, "content");
   assert.deepEqual(added?.hunkRanges, []);
+  assert.equal(added?.worktreeHunks?.length, 1);
+  assert.equal(added?.worktreeHunks?.[0]?.newStart, 1);
+  assert.equal(added?.worktreeHunks?.[0]?.matchSide, "content");
   assert.deepEqual(added?.matchLineFingerprints, [
     "021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96",
     "9425421c0be371e4aed35b8f35b003fccf84bd0f86f4d2a50d59d76930fa4aeb",
@@ -520,6 +526,8 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
   assert.equal(truncated?.payloadTruncated, true);
   assert.ok((truncated?.matchLineFingerprints.length ?? 0) <= 128);
   assert.ok((truncated?.distinctiveLineFingerprints.length ?? 0) >= 2);
+  assert.equal(truncated?.worktreeHunks?.[0]?.truncated, true);
+  assert.ok((truncated?.worktreeHunks?.[0]?.orderedLineFingerprints.length ?? 0) <= 128);
   const unsupported = changes.slice(4);
   assert.equal(unsupported.length, 4);
   assert.ok(unsupported.every((change) => change.payloadRecovered));
@@ -531,6 +539,34 @@ test("structured patch evidence normalizes operation sides, ranges, truncation, 
     JSON.stringify(bundle),
     /SECRET_RAW_PATCH_INPUT|SECRET_TRUNCATED_SOURCE|private secret context|removed secret source|firstMeaningful|secondMeaningful|addedFirst|addedSecond|deletedFirst|deletedSecond|truncatedFirst|truncatedSecond|retainedLine|unsupportedAddDiff|unsupportedUpdateContent|unsupportedDeleteDiff|unsupportedUnknownContent/,
   );
+});
+
+test("retains source-ordered normalized worktree patch hunks under one shared fingerprint cap", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const sourcePath = await writeTranscript(directory, "multi-hunk.jsonl", durableTerminalRecords({
+    changes: {
+      "/home/alice/projects/example/src/multi.ts": {
+        type: "update",
+        unified_diff: [
+          "@@ -1,1 +10,2 @@",
+          "-old-one",
+          "+const firstNormalizedLine = true;",
+          "+const secondNormalizedLine = false;",
+          "@@ -20,1 +30,1 @@",
+          "-old-two",
+          "+const thirdNormalizedLine = true;",
+        ].join("\n"),
+      },
+    },
+  }));
+  const change = evidenceOf(await extractCodexEvidence(refFor(sourcePath)), "patch-result")[0]?.patch?.changes[0];
+  assert.equal(change?.worktreeHunks?.length, 2);
+  assert.deepEqual(change?.worktreeHunks?.map((hunk) => [hunk.newStart, hunk.newLines, hunk.matchSide]), [
+    [10, 2, "added"],
+    [30, 1, "added"],
+  ]);
+  assert.deepEqual(change?.worktreeHunks?.map((hunk) => hunk.lineCount), [2, 1]);
+  assert.equal(change?.worktreeHunks?.every((hunk) => hunk.truncated === false), true);
 });
 
 test("distinctive line classification rejects weak and boilerplate lines", () => {

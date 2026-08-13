@@ -5,7 +5,7 @@ import type {
   WhylineReport,
 } from "../provenance/model.js";
 import type { GitAncestryResult } from "../ancestry/model.js";
-import { renderCorrelation } from "./render-correlation.js";
+import { renderCorrelation, renderWorktreeCorrelation } from "./render-correlation.js";
 
 const MAX_RENDERED_CHANGES = 24;
 const MAX_RENDERED_HUNK_LINES = 28;
@@ -182,24 +182,41 @@ export function renderText(report: WhylineReport): string {
   output.push(...renderAncestryDetails(report.ancestry));
 
   output.push("", "Relevant change");
-  output.push(`  parent: ${sanitizeTerminalText(parentDescription(report))}`);
-  if (provenance.changedPaths.length === 0) {
-    output.push("  changed paths: none available");
-  } else {
-    output.push("  changed paths:");
-    for (const change of provenance.changedPaths.slice(0, MAX_RENDERED_CHANGES)) {
-      output.push(`    ${pathChange(change)}`);
+  if (report.worktreeCorrelation !== undefined) {
+    const worktree = report.worktreeCorrelation;
+    output.push("  target kind: worktree");
+    output.push(`  base HEAD: ${sanitizeTerminalText(worktree.baseCommitId)}`);
+    output.push(`  current path: ${sanitizeTerminalText(worktree.targetPath)}`);
+    output.push(`  change: ${worktree.changeKind}`);
+    output.push(`  staging: ${worktree.staging}`);
+    for (const hunk of worktree.hunks.slice(0, 8)) {
+      output.push(`  hunk: -${range(hunk.oldStart, hunk.oldLines)} +${range(hunk.newStart, hunk.newLines)}`);
     }
-    if (provenance.changedPaths.length > MAX_RENDERED_CHANGES) {
-      output.push(`    … ${provenance.changedPaths.length - MAX_RENDERED_CHANGES} more paths …`);
+    output.push(`  target construction: ${worktree.construction ?? "unknown"}`);
+    output.push(`  correlation: ${worktree.status}`);
+    if (worktree.result !== undefined) {
+      output.push("", ...renderWorktreeCorrelation(worktree.result).split("\n"));
     }
-  }
-  if (provenance.relevantHunks.length === 0) {
-    output.push("  hunk: none available");
   } else {
-    output.push(...renderHunk(provenance.relevantHunks[0] as GitHunk));
-    if (provenance.relevantHunks.length > 1) {
-      output.push(`  (${provenance.relevantHunks.length - 1} additional relevant hunk(s) omitted)`);
+    output.push(`  parent: ${sanitizeTerminalText(parentDescription(report))}`);
+    if (provenance.changedPaths.length === 0) {
+      output.push("  changed paths: none available");
+    } else {
+      output.push("  changed paths:");
+      for (const change of provenance.changedPaths.slice(0, MAX_RENDERED_CHANGES)) {
+        output.push(`    ${pathChange(change)}`);
+      }
+      if (provenance.changedPaths.length > MAX_RENDERED_CHANGES) {
+        output.push(`    … ${provenance.changedPaths.length - MAX_RENDERED_CHANGES} more paths …`);
+      }
+    }
+    if (provenance.relevantHunks.length === 0) {
+      output.push("  hunk: none available");
+    } else {
+      output.push(...renderHunk(provenance.relevantHunks[0] as GitHunk));
+      if (provenance.relevantHunks.length > 1) {
+        output.push(`  (${provenance.relevantHunks.length - 1} additional relevant hunk(s) omitted)`);
+      }
     }
   }
 

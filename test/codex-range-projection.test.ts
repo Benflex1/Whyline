@@ -156,8 +156,10 @@ function hunk(targetPath: string): CorrelationHunk {
 
 function target(targetPath: string): CorrelationTarget {
   return {
+    kind: "commit",
     repository: {
       worktreeRoot: WORKTREE,
+      gitDir: WORKTREE + "/.git",
       commonGitDir: WORKTREE + "/.git",
       objectFormat: "sha1",
       worktrees: [{ path: WORKTREE, commonGitDir: WORKTREE + "/.git" }],

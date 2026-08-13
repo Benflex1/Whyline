@@ -5,6 +5,7 @@ import type {
   AgentOperation,
   AgentPatchChange,
   AgentPatchEvidenceOrigin,
+  AgentPatchHunkEvidence,
   AgentPatchHunkRange,
   AgentRelevanceCoverage,
   AgentSummaryRelevanceScan,
@@ -137,12 +138,148 @@ interface NormalizedPayloadLines {
   readonly matchLines: readonly string[];
   readonly lineCount: number;
   readonly hunkRanges: readonly AgentPatchHunkRange[];
+  readonly worktreeHunks: readonly AgentPatchHunkEvidence[];
+  readonly worktreeComplete: boolean;
+}
+
+interface HunkBuilder {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly matchLines: string[];
+  oldObserved: number;
+  newObserved: number;
+  truncated: boolean;
+}
+
+function hunkFingerprintData(
+  lines: readonly string[],
+  budget: { remaining: number },
+  forcedTruncated = false,
+): { readonly ordered: readonly string[]; readonly distinctive: readonly string[]; readonly truncated: boolean } {
+  const ordered: string[] = [];
+  let truncated = forcedTruncated;
+  for (const line of lines) {
+    if (budget.remaining <= 0) {
+      truncated = true;
+      break;
+    }
+    ordered.push(digest(line));
+    budget.remaining -= 1;
+  }
+  if (ordered.length < lines.length) truncated = true;
+  return {
+    ordered,
+    distinctive: uniqueStrings(
+      lines.slice(0, ordered.length).filter(isDistinctiveLine).map((line) => digest(line)),
+    ),
+    truncated,
+  };
+}
+
+function finishNormalizedHunk(
+  builder: HunkBuilder,
+  budget: { remaining: number },
+  forcedTruncated: boolean,
+): AgentPatchHunkEvidence {
+  const fingerprints = hunkFingerprintData(builder.matchLines, budget, forcedTruncated || builder.truncated);
+  const countMismatch = builder.oldObserved !== builder.oldLines || builder.newObserved !== builder.newLines;
+  return {
+    oldStart: builder.oldStart,
+    oldLines: builder.oldLines,
+    newStart: builder.newStart,
+    newLines: builder.newLines,
+    matchSide: "added",
+    orderedLineFingerprints: fingerprints.ordered,
+    distinctiveLineFingerprints: fingerprints.distinctive,
+    lineCount: fingerprints.ordered.length,
+    truncated: fingerprints.truncated || countMismatch,
+  };
+}
+
+function parseNormalizedUpdateHunks(
+  lines: readonly string[],
+  payloadTruncated: boolean,
+): { readonly hunks: readonly AgentPatchHunkEvidence[]; readonly ranges: readonly AgentPatchHunkRange[]; readonly complete: boolean } {
+  const hunks: AgentPatchHunkEvidence[] = [];
+  const ranges: AgentPatchHunkRange[] = [];
+  const budget = { remaining: MAX_PATCH_LINE_FINGERPRINTS };
+  let current: HunkBuilder | undefined;
+  let complete = !payloadTruncated;
+  const finish = (): void => {
+    if (current === undefined) return;
+    const normalized = finishNormalizedHunk(current, budget, payloadTruncated);
+    hunks.push(normalized);
+    if (normalized.truncated) complete = false;
+    current = undefined;
+  };
+
+  for (const line of lines) {
+    const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (match !== null) {
+      finish();
+      const oldStart = Number(match[1]);
+      const oldLines = Number(match[2] ?? "1");
+      const newStart = Number(match[3]);
+      const newLines = Number(match[4] ?? "1");
+      if (![oldStart, oldLines, newStart, newLines].every((value) => Number.isSafeInteger(value))) {
+        complete = false;
+        continue;
+      }
+      ranges.push({ oldStart, oldLines, newStart, newLines });
+      current = { oldStart, oldLines, newStart, newLines, matchLines: [], oldObserved: 0, newObserved: 0, truncated: false };
+      continue;
+    }
+    if (current === undefined) {
+      if (line.length === 0 || line.startsWith("diff ") || line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("index ") || line.startsWith("new file") || line.startsWith("old mode") || line.startsWith("new mode") || line.startsWith("similarity ") || line.startsWith("\\")) continue;
+      complete = false;
+      continue;
+    }
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      current.newObserved += 1;
+      current.matchLines.push(line.slice(1));
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      current.oldObserved += 1;
+    } else if (line.startsWith(" ")) {
+      current.oldObserved += 1;
+      current.newObserved += 1;
+    } else if (line.startsWith("\\")) {
+      continue;
+    } else if (line.length > 0) {
+      current.truncated = true;
+      complete = false;
+    }
+  }
+  finish();
+  if (hunks.length === 0) complete = false;
+  return { hunks, ranges, complete };
+}
+
+function syntheticContentHunk(
+  lines: readonly string[],
+  payloadTruncated: boolean,
+  budget: { remaining: number },
+): AgentPatchHunkEvidence {
+  const fingerprints = hunkFingerprintData(lines, budget, payloadTruncated);
+  return {
+    oldStart: 0,
+    oldLines: 0,
+    newStart: 1,
+    newLines: lines.length,
+    matchSide: "content",
+    orderedLineFingerprints: fingerprints.ordered,
+    distinctiveLineFingerprints: fingerprints.distinctive,
+    lineCount: fingerprints.ordered.length,
+    truncated: fingerprints.truncated,
+  };
 }
 
 function normalizedPayloadLines(
   payload: string,
   kind: "unified-diff" | "content",
   changeType: AgentPatchChange["changeType"],
+  payloadTruncated: boolean,
 ): NormalizedPayloadLines {
   const normalized = payload.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
   const lines = normalized.length === 0 ? [] : normalized.split("\n");
@@ -153,35 +290,28 @@ function normalizedPayloadLines(
         : line.startsWith("+") && !line.startsWith("+++"))
       .map((line) => line.slice(1))
     : lines;
-  const hunkRanges = kind === "unified-diff" && changeType === "update"
-    ? lines.flatMap((line) => {
-      const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
-      if (match === null) {
-        return [];
-      }
-      const oldStart = Number(match[1]);
-      const oldLines = Number(match[2] ?? "1");
-      const newStart = Number(match[3]);
-      const newLines = Number(match[4] ?? "1");
-      if (![oldStart, oldLines, newStart, newLines].every((value) => Number.isSafeInteger(value))) {
-        return [];
-      }
-      return [{
-        oldStart,
-        oldLines,
-        newStart,
-        newLines,
-      }];
-    })
-    : [];
-  return { normalized, matchLines, lineCount: lines.length, hunkRanges };
+  const parseLines = lines.length > 0 && lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
+  if (kind === "unified-diff" && changeType === "update") {
+    const parsed = parseNormalizedUpdateHunks(parseLines, payloadTruncated);
+    return { normalized, matchLines, lineCount: lines.length, hunkRanges: parsed.ranges, worktreeHunks: parsed.hunks, worktreeComplete: parsed.complete };
+  }
+  if (kind === "content" && (changeType === "add" || changeType === "delete")) {
+    const hunk = syntheticContentHunk(parseLines, payloadTruncated, { remaining: MAX_PATCH_LINE_FINGERPRINTS });
+    return { normalized, matchLines, lineCount: lines.length, hunkRanges: [], worktreeHunks: [hunk], worktreeComplete: !hunk.truncated };
+  }
+  return { normalized, matchLines, lineCount: lines.length, hunkRanges: [], worktreeHunks: [], worktreeComplete: false };
+}
+
+interface RecoveredSinglePatchChange {
+  readonly change: AgentPatchChange;
+  readonly worktreeComplete: boolean;
 }
 
 function recoverPatchChange(
   rawPath: string,
   rawChange: unknown,
   sessionCwd: string | undefined,
-): AgentPatchChange | undefined {
+): RecoveredSinglePatchChange | undefined {
   if (sessionCwd === undefined) {
     return undefined;
   }
@@ -201,7 +331,7 @@ function recoverPatchChange(
   const rawPayload = rawDiff ?? rawContent ?? "";
   const payloadRecovered = rawDiff !== undefined || rawContent !== undefined;
   const bounded = boundPayload(rawPayload);
-  const lineData = normalizedPayloadLines(bounded.text, payloadKind, changeType);
+  const lineData = normalizedPayloadLines(bounded.text, payloadKind, changeType, bounded.truncated);
   const supportsDirectMatch = (changeType === "update" && payloadKind === "unified-diff")
     || (changeType === "add" && payloadKind === "content")
     || (changeType === "delete" && payloadKind === "content");
@@ -236,8 +366,10 @@ function recoverPatchChange(
     matchSide,
     hunkRanges: supportsDirectMatch ? lineData.hunkRanges : [],
     lineCount: lineData.lineCount,
+    worktreeHunks: lineData.worktreeHunks,
   };
-  return movedFromValue === undefined ? result : { ...result, movedFrom: movedFromValue };
+  const normalized = movedFromValue === undefined ? result : { ...result, movedFrom: movedFromValue };
+  return { change: normalized, worktreeComplete: lineData.worktreeComplete };
 }
 
 function safeNormalizedPatchPath(value: string | undefined): boolean {
@@ -318,10 +450,11 @@ function recoverPatchChanges(
     }
     const recovered = recoverPatchChange(rawPath, rawChange, sessionCwd);
     if (recovered !== undefined) {
-      changes.push(recovered);
-      if (recovered.changeType === "unknown"
-        || !recovered.payloadRecovered
-        || recovered.payloadTruncated) {
+      changes.push(recovered.change);
+      if (recovered.change.changeType === "unknown"
+        || !recovered.change.payloadRecovered
+        || recovered.change.payloadTruncated
+        || !recovered.worktreeComplete) {
         context.addRelevanceReason("unclassified-patch-change");
         complete = false;
       }

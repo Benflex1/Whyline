@@ -6,7 +6,7 @@ import type {
   CorrelationCandidate,
   CorrelationResult,
 } from "../src/correlation/model.js";
-import { renderCorrelation } from "../src/cli/render-correlation.js";
+import { renderCorrelation, renderWorktreeCorrelation } from "../src/cli/render-correlation.js";
 import { renderText } from "../src/cli/render-text.js";
 import type { WhylineReport } from "../src/provenance/model.js";
 
@@ -108,6 +108,15 @@ test("renders a matched result with bounded fixed evidence", () => {
   ]) {
     assert.equal(output.includes(secret), false, secret);
   }
+});
+
+test("worktree rendering uses current-change wording", () => {
+  const output = renderWorktreeCorrelation(result("matched", {
+    selected: candidate("worktree-session"),
+  }));
+  assert.match(output, /exactly overlaps this current worktree change/);
+  assert.doesNotMatch(output, /attributed change/);
+  assert.doesNotMatch(output, /prompt-secret|\/absolute\/worktree/);
 });
 
 test("bounds and allocates the selected and possible session IDs", () => {

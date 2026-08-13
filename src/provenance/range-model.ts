@@ -90,11 +90,15 @@ export type RangeCorrelationStatus =
   | "ambiguous"
   | "none"
   | "unavailable"
+  | "insufficient"
   | "not-run"
   | "work-bound";
 
 export interface RangeCorrelationGroup {
   readonly groupId: string;
+  readonly analysisGroupId: string;
+  readonly textualGroupId: string;
+  readonly targetKind: "commit" | "worktree";
   readonly spans: readonly RangeLineSpan[];
   readonly status: RangeCorrelationStatus;
   readonly result?: CorrelationResult;
@@ -104,7 +108,9 @@ export interface RangeCorrelationGroup {
 export interface RangeAnalysisCoverage {
   readonly committedGroups: number;
   readonly deepAnalyzedGroups: number;
+  readonly readyWorktreeGroups: number;
   readonly workBoundGroups: number;
+  readonly groupLimitOmissions: number;
   readonly uncommittedGroups: number;
 }
 

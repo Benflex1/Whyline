@@ -5,7 +5,7 @@ import type { CorrelationCandidate, CorrelationResult } from "../src/correlation
 import type { GitAncestryResult } from "../src/ancestry/model.js";
 import { renderSummary } from "../src/cli/render-summary.js";
 import { renderText } from "../src/cli/render-text.js";
-import type { WhylineReport } from "../src/provenance/model.js";
+import type { WhylineReport, WorktreeCorrelationReport } from "../src/provenance/model.js";
 
 function candidate(sessionId: string, band: CorrelationCandidate["band"] = "strong"): CorrelationCandidate {
   return {
@@ -119,6 +119,7 @@ const transformed: GitAncestryResult = {
 function report(
   ancestry: GitAncestryResult | undefined,
   correlationResult: CorrelationResult | undefined,
+  worktreeCorrelation?: WorktreeCorrelationReport,
 ): WhylineReport {
   return {
     repository: {
@@ -187,6 +188,7 @@ function report(
     },
     ...(ancestry === undefined ? {} : { ancestry }),
     ...(correlationResult === undefined ? {} : { correlation: correlationResult }),
+    ...(worktreeCorrelation === undefined ? {} : { worktreeCorrelation }),
   };
 }
 
@@ -213,6 +215,26 @@ test("default summary is concise, outcome-first, and exact-ancestry specific", (
   assert.equal(output.includes("original commit"), false);
   assert.equal(output.includes("/private"), false);
   assert.equal(output.length < 1200, true);
+});
+
+test("worktree summary uses uncommitted and current-worktree wording", () => {
+  const output = renderSummary(report(undefined, undefined, {
+    targetKind: "worktree",
+    baseCommitId: "0123456789abcdef",
+    targetPath: "src/parser.ts",
+    changeKind: "modified",
+    staging: "unstaged",
+    coveredSpans: [{ startLine: 42, endLine: 43 }],
+    hunks: [],
+    status: "matched",
+    construction: "ready",
+    result: correlation("matched", { selected: candidate("worktree-session") }),
+    limitations: [],
+  }));
+  assert.match(output, /Textual last-touch: uncommitted; modified against HEAD 0123456/);
+  assert.match(output, /Git ancestry: not run for an uncommitted line/);
+  assert.match(output, /exactly overlaps this current worktree change/);
+  assert.doesNotMatch(output, /originated|human-authored|\/private/);
 });
 
 test("renders transformed ancestry as bounded correspondence without historical claims", () => {

@@ -438,8 +438,12 @@ function isAllowedReadOnlyGit(
     : command === "diff" || command === "diff-tree"
       ? ["core.quotePath=false"]
       : [];
-  if (parsed.configs.length !== expectedConfigs.length
-    || parsed.configs.some((value, index) => value !== expectedConfigs[index])) {
+  const worktreeDiffWithoutConfig = command === "diff"
+    && parsed.configs.length === 0
+    && (normalized[1] === "--raw" || normalized[1] === "--patch");
+  if (!worktreeDiffWithoutConfig
+    && (parsed.configs.length !== expectedConfigs.length
+      || parsed.configs.some((value, index) => value !== expectedConfigs[index]))) {
     return false;
   }
   const exact = (expected: readonly string[]): boolean =>
@@ -472,7 +476,7 @@ function isAllowedReadOnlyGit(
     const historicalBlob = normalized.length === 6
       && normalized[1] === "-z"
       && normalized[2] === "--full-tree"
-      && isHexCommit(normalized[3]!)
+      && (isHexCommit(normalized[3]!) || normalized[3] === "HEAD")
       && normalized[4] === "--"
       && isSafeRepositoryPath(normalized[5]!);
     const headNames = normalized.length === 7
@@ -485,10 +489,16 @@ function isAllowedReadOnlyGit(
     return historicalBlob || headNames;
   }
   if (command === "ls-files") {
-    return normalized.length === 4
+    const index = normalized.length === 5
+      && normalized[1] === "--stage"
+      && normalized[2] === "-z"
+      && normalized[3] === "--"
+      && isSafeRepositoryPath(normalized[4]!);
+    const historical = normalized.length === 4
       && normalized[1] === "--error-unmatch"
       && normalized[2] === "--"
       && isSafeRepositoryPath(normalized[3]!);
+    return index || historical;
   }
   if (command === "cat-file") {
     const commitExistence = normalized.length === 3
@@ -497,7 +507,10 @@ function isAllowedReadOnlyGit(
     const blobRead = normalized.length === 3
       && normalized[1] === "blob"
       && isHexCommit(normalized[2]!);
-    return commitExistence || blobRead;
+    const blobSize = normalized.length === 3
+      && normalized[1] === "-s"
+      && isHexCommit(normalized[2]!);
+    return commitExistence || blobRead || blobSize;
   }
   if (command === "hash-object") {
     return exact(["hash-object", "-t", "tree", "--stdin"])
@@ -532,7 +545,7 @@ function isAllowedReadOnlyGit(
     return root || parent;
   }
   if (command === "diff") {
-    return normalized.length >= 9
+    const committed = normalized.length >= 9
       && normalized[1] === "--no-ext-diff"
       && normalized[2] === "--no-color"
       && normalized[3] === "--find-renames"
@@ -541,6 +554,28 @@ function isAllowedReadOnlyGit(
       && isHexCommit(normalized[6]!)
       && normalized[7] === "--"
       && normalized.slice(8).every(isSafeRepositoryPath);
+    const rawWorktree = normalized.length === 10
+      && normalized[1] === "--raw"
+      && normalized[2] === "-z"
+      && normalized[3] === "--no-abbrev"
+      && normalized[4] === "--no-renames"
+      && normalized[5] === "--no-ext-diff"
+      && normalized[6] === "--no-textconv"
+      && normalized[7] === "HEAD"
+      && normalized[8] === "--"
+      && isSafeRepositoryPath(normalized[9]!);
+    const patchWorktree = normalized.length === 11
+      && normalized[1] === "--patch"
+      && normalized[2] === "--unified=0"
+      && normalized[3] === "--no-indent-heuristic"
+      && normalized[4] === "--no-renames"
+      && normalized[5] === "--no-ext-diff"
+      && normalized[6] === "--no-textconv"
+      && normalized[7] === "--no-color"
+      && normalized[8] === "HEAD"
+      && normalized[9] === "--"
+      && isSafeRepositoryPath(normalized[10]!);
+    return committed || rawWorktree || patchWorktree;
   }
   if (command === "blame") {
     const baseline = normalized.length === 6

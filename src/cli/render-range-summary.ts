@@ -1,6 +1,9 @@
 import type { CorrelationResult } from "../correlation/model.js";
 import type { RangeAncestrySegment, RangeTextualGroup, WhylineRangeReport } from "../provenance/range-model.js";
-import { renderCorrelationSummary } from "./render-correlation.js";
+import {
+  renderCorrelationSummary,
+  renderWorktreeCorrelationSummary,
+} from "./render-correlation.js";
 import { sanitizeTerminalText } from "./render-text.js";
 
 const MAX_RENDERED_GROUPS = 12;
@@ -58,8 +61,11 @@ function renderAncestrySegment(segment: RangeAncestrySegment): string {
 function renderCorrelationResult(
   span: string,
   result: CorrelationResult,
+  targetKind: "commit" | "worktree",
 ): string[] {
-  const rendered = renderCorrelationSummary(result);
+  const rendered = targetKind === "worktree"
+    ? renderWorktreeCorrelationSummary(result)
+    : renderCorrelationSummary(result);
   const first = rendered[0]?.trim() ?? "AI provenance: no reliable Codex match";
   return [
     "    " + span + "  " + first,
@@ -97,17 +103,32 @@ export function renderRangeSummaryWithHeader(
   }
 
   lines.push("", "  AI provenance");
-  const correlationByGroup = new Map(report.correlations.map((value) => [value.groupId, value]));
+  const correlationByTextualGroup = new Map<string, readonly typeof report.correlations[number][]>();
+  for (const correlation of report.correlations) {
+    const existing = correlationByTextualGroup.get(correlation.textualGroupId) ?? [];
+    correlationByTextualGroup.set(correlation.textualGroupId, [...existing, correlation]);
+  }
   for (const group of visibleTextual) {
-    const correlation = correlationByGroup.get(group.id);
-    if (correlation === undefined || correlation.status === "not-run") {
+    const correlations = correlationByTextualGroup.get(group.id) ?? [];
+    if (correlations.length === 0) {
       lines.push("    " + spanText(group) + "  not run");
-    } else if (correlation.status === "work-bound") {
-      lines.push("    " + spanText(group) + "  unavailable / work-bound");
-    } else if (correlation.result !== undefined) {
-      lines.push(...renderCorrelationResult(spanText(group), correlation.result));
     } else {
-      lines.push("    " + spanText(group) + "  unavailable");
+      for (const correlation of correlations) {
+        const span = correlation.spans.map((value) => value.startLine === value.endLine
+          ? String(value.startLine)
+          : value.startLine + "-" + value.endLine).join(", ");
+        if (correlation.status === "not-run") {
+          lines.push("    " + span + "  not run");
+        } else if (correlation.status === "work-bound") {
+          lines.push("    " + span + "  unavailable / work-bound");
+        } else if (correlation.status === "insufficient") {
+          lines.push("    " + span + "  not established; worktree material is insufficient");
+        } else if (correlation.result !== undefined) {
+          lines.push(...renderCorrelationResult(span, correlation.result, correlation.targetKind));
+        } else {
+          lines.push("    " + span + "  unavailable");
+        }
+      }
     }
   }
   if (report.textualGroups.length > MAX_RENDERED_GROUPS) {

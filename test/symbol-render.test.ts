@@ -33,7 +33,14 @@ test("symbol renderers expose bounded resolver context without historical claims
     textualGroups: [],
     ancestry: new Map(),
     correlations: [],
-    coverage: { committedGroups: 0, deepAnalyzedGroups: 0, workBoundGroups: 0, uncommittedGroups: 0 },
+    coverage: {
+      committedGroups: 0,
+      deepAnalyzedGroups: 0,
+      readyWorktreeGroups: 0,
+      workBoundGroups: 0,
+      groupLimitOmissions: 0,
+      uncommittedGroups: 0,
+    },
   };
   const report = {
     selector: "Parser.parseToken",

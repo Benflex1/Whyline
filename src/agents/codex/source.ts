@@ -5,6 +5,7 @@ import type {
   AgentHistoryDiscoveryContext,
   AgentHistorySource,
   AgentSummaryRelevanceScan,
+  AgentSourceSignature,
   AgentSessionRef,
   AgentSessionSummary,
   AgentEvidenceTarget,
@@ -66,6 +67,21 @@ export class CodexHistorySource implements AgentHistorySource {
 
   public readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary> {
     return readCodexSummary(ref);
+  }
+
+  public async verifySourceSignature(
+    ref: AgentSessionRef,
+    expected: AgentSourceSignature,
+  ): Promise<boolean> {
+    try {
+      const metadata = await stat(ref.sourcePath, { bigint: true });
+      return metadata.dev === BigInt(expected.device)
+        && metadata.ino === BigInt(expected.inode)
+        && metadata.size === BigInt(expected.size)
+        && metadata.mtimeNs === expected.mtimeNs;
+    } catch {
+      return false;
+    }
   }
 
   public async scanSummaryAndRelevance(

@@ -118,6 +118,14 @@ export type AgentOperation =
   | "patch"
   | "mcp";
 
+export type AgentWorktreeIdentity =
+  | "exact-current-worktree"
+  | "linked-worktree"
+  | "same-common-directory"
+  | "historical-commit-anchored"
+  | "unknown"
+  | "incompatible";
+
 export interface AgentPatchHunkRange {
   readonly oldStart: number;
   readonly oldLines: number;
@@ -177,6 +185,8 @@ export interface AgentEvidence {
   readonly occurredAt?: string | undefined;
   /** Normalized to the session's initial cwd when possible. */
   readonly cwd?: string | undefined;
+  /** Invocation-local classification used only by worktree correlation. */
+  readonly worktreeIdentity?: AgentWorktreeIdentity | undefined;
   readonly paths: readonly string[];
   readonly operation?: AgentOperation | undefined;
   readonly callId?: string | undefined;
@@ -238,6 +248,10 @@ export interface AgentHistorySource {
     ref: AgentSessionRef,
     target?: AgentEvidenceTarget,
   ): Promise<AgentSummaryRelevanceScan>;
+  verifySourceSignature?(
+    ref: AgentSessionRef,
+    signature: AgentSourceSignature,
+  ): Promise<boolean>;
   readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary>;
   extractEvidence(
     ref: AgentSessionRef,

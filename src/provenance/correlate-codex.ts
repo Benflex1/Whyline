@@ -13,6 +13,7 @@ import type {
   AgentSessionRef,
   AgentSessionSummary,
   AgentEvidenceTarget,
+  AgentWorktreeIdentity,
 } from "../agents/agent-history-source.js";
 import { CodexHistorySource } from "../agents/codex/source.js";
 import {
@@ -21,12 +22,15 @@ import {
   type CandidateBuildRequest,
 } from "../correlation/build-candidates.js";
 import { correlate } from "../correlation/correlate.js";
+import { correlateWorktree } from "../correlation/correlate-worktree.js";
 import type {
   CorrelationCandidateInput,
   CorrelationLimitation,
   CorrelationRepositoryMatch,
   CorrelationResult,
   CorrelationTarget,
+  ProvenanceCorrelationTarget,
+  WorktreeCorrelationTarget,
   CandidateStrongPossibility,
   ResolvedCommitReference,
 } from "../correlation/model.js";
@@ -48,6 +52,7 @@ import type {
   ResolvedCodeLocation,
 } from "./model.js";
 import { resolveCommitReference } from "./resolve-commit-reference.js";
+import { OperationalError } from "../whyline-error.js";
 
 const MAX_FULL_EVIDENCE_CANDIDATES = 32;
 
@@ -606,6 +611,9 @@ async function projectEvidence(
       reportedSuccess: evidence.reportedSuccess,
       status: evidence.status,
       patch,
+      ...(evidence.worktreeIdentity === undefined
+        ? {}
+        : { worktreeIdentity: evidence.worktreeIdentity }),
       commitReferenceKind: evidence.commitReferenceKind,
       commitIds: evidence.commitIds,
       extraction: evidence.extraction,
@@ -1436,7 +1444,7 @@ export async function prepareCodexEvidence(
   };
 }
 
-export async function projectPreparedCodex(
+async function projectPreparedCommitCodex(
   prepared: PreparedCodexEvidence,
   target: CorrelationTarget,
   _location: ResolvedCodeLocation,
@@ -1641,4 +1649,307 @@ export async function projectPreparedCodex(
     omittedPotentiallyStrongRefs,
     limitations: finalLimitations,
   });
+}
+
+interface ResolvedWorktreeIdentity {
+  readonly kind: AgentWorktreeIdentity;
+  readonly directory: string;
+}
+
+async function canonicalComparisonPath(value: string): Promise<string> {
+  const canonical = await existingCanonicalPath(value);
+  return canonical ?? path.resolve(value);
+}
+
+async function gitIdentityAt(
+  runner: GitRunner,
+  directory: string,
+): Promise<{
+  readonly root: string;
+  readonly gitDir: string;
+  readonly commonGitDir: string;
+  readonly objectFormat: string;
+} | null> {
+  const commands = await Promise.all([
+    ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+    ["rev-parse", "--path-format=absolute", "--git-dir"],
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ["rev-parse", "--show-object-format"],
+  ].map(async (args) => {
+    try {
+      return await runner.run(args, { cwd: directory });
+    } catch {
+      return null;
+    }
+  }));
+  if (commands.some((result) => result === null || result.exitCode !== 0)) return null;
+  const values = commands.map((result) => result?.stdout.toString("utf8").trim() ?? "");
+  if (values.some((value) => value.length === 0)) return null;
+  return {
+    root: await canonicalComparisonPath(values[0] as string),
+    gitDir: await canonicalComparisonPath(values[1] as string),
+    commonGitDir: await canonicalComparisonPath(values[2] as string),
+    objectFormat: values[3] as string,
+  };
+}
+
+async function classifyWorktreeDirectory(
+  runner: GitRunner,
+  target: WorktreeCorrelationTarget,
+  directory: string,
+): Promise<ResolvedWorktreeIdentity> {
+  let canonicalDirectory: string;
+  try {
+    const metadata = await stat(directory);
+    if (!metadata.isDirectory()) return { kind: "unknown", directory };
+    canonicalDirectory = await canonicalComparisonPath(directory);
+  } catch {
+    return { kind: "unknown", directory };
+  }
+  const identity = await gitIdentityAt(runner, canonicalDirectory);
+  if (identity === null) return { kind: "unknown", directory: canonicalDirectory };
+
+  const targetRoot = await canonicalComparisonPath(target.repository.worktreeRoot);
+  const targetGitDir = await canonicalComparisonPath(target.repository.gitDir);
+  const targetCommonGitDir = await canonicalComparisonPath(target.repository.commonGitDir);
+  const sameRoot = identity.root === targetRoot;
+  const sameGitDir = identity.gitDir === targetGitDir;
+  const sameCommonGitDir = identity.commonGitDir === targetCommonGitDir;
+  const sameObjectFormat = identity.objectFormat === target.repository.objectFormat;
+  if (sameRoot && sameGitDir && sameCommonGitDir && sameObjectFormat) {
+    return { kind: "exact-current-worktree", directory: canonicalDirectory };
+  }
+  if (!sameCommonGitDir || !sameObjectFormat) {
+    return { kind: "incompatible", directory: canonicalDirectory };
+  }
+  if (sameRoot) return { kind: "incompatible", directory: canonicalDirectory };
+  const linked = target.repository.worktrees.some((worktree) =>
+    path.resolve(worktree.path) === identity.root
+      && path.resolve(worktree.path) !== path.resolve(target.repository.worktreeRoot));
+  return {
+    kind: linked ? "linked-worktree" : "same-common-directory",
+    directory: canonicalDirectory,
+  };
+}
+
+async function effectiveEvidenceDirectories(
+  evidence: AgentEvidenceBundle["evidence"][number],
+  summary: AgentSessionSummary,
+): Promise<readonly string[]> {
+  if (evidence.cwd !== undefined) {
+    const directory = evidenceDirectory(evidence.cwd, summary.initialCwd);
+    return directory === null ? [] : [directory];
+  }
+  return [...new Set([
+    summary.initialCwd,
+    ...summary.workingDirectories,
+  ].filter((value): value is string => value !== undefined))]
+    .map((value) => evidenceDirectory(value, summary.initialCwd))
+    .filter((value): value is string => value !== null);
+}
+
+async function classifyWorktreeEvidence(
+  runner: GitRunner,
+  target: WorktreeCorrelationTarget,
+  evidence: AgentEvidenceBundle["evidence"][number],
+  summary: AgentSessionSummary,
+): Promise<ResolvedWorktreeIdentity> {
+  const directories = await effectiveEvidenceDirectories(evidence, summary);
+  if (directories.length === 0) return { kind: "unknown", directory: "" };
+  const identities = await Promise.all(directories.map((directory) =>
+    classifyWorktreeDirectory(runner, target, directory)));
+  const first = identities[0];
+  if (first === undefined) return { kind: "unknown", directory: "" };
+  if (evidence.cwd !== undefined || identities.every((value) => value.kind === first.kind)) {
+    return first.kind === "exact-current-worktree"
+      ? first
+      : { kind: first.kind, directory: first.directory };
+  }
+  return { kind: "unknown", directory: first.directory };
+}
+
+function worktreePath(
+  value: string,
+  directory: string,
+  target: WorktreeCorrelationTarget,
+): string | null {
+  if (value.length === 0 || value === "<outside-session-root>") return null;
+  const absolute = path.isAbsolute(value)
+    ? path.resolve(value)
+    : path.resolve(directory, value);
+  return relativeRepositoryPath(target.repository.worktreeRoot, absolute);
+}
+
+async function projectWorktreeEvidence(
+  evidence: AgentEvidenceBundle["evidence"][number],
+  summary: AgentSessionSummary,
+  target: WorktreeCorrelationTarget,
+  runner: GitRunner,
+): Promise<AgentEvidenceBundle["evidence"][number]> {
+  const identity = await classifyWorktreeEvidence(runner, target, evidence, summary);
+  const directories = await effectiveEvidenceDirectories(evidence, summary);
+  const directory = identity.directory || directories[0] || summary.initialCwd || target.repository.worktreeRoot;
+  const projectChange = (change: NonNullable<typeof evidence.patch>["changes"][number]) => {
+    const normalizedPath = worktreePath(change.path, directory, target);
+    const normalizedMovedFrom = change.movedFrom === undefined
+      ? undefined
+      : worktreePath(change.movedFrom, directory, target);
+    const next = normalizedPath === null ? change : { ...change, path: normalizedPath };
+    return normalizedMovedFrom === undefined
+      ? next
+      : { ...next, movedFrom: normalizedMovedFrom ?? change.movedFrom };
+  };
+  const patch = evidence.patch === undefined
+    ? undefined
+    : {
+      ...evidence.patch,
+      changes: evidence.patch.changes.map(projectChange),
+    };
+  return {
+    ...evidence,
+    ...(identity.kind === undefined ? {} : { worktreeIdentity: identity.kind }),
+    patch,
+  };
+}
+
+function worktreeInput(
+  candidate: PreparedCodexCandidate,
+  evidence: AgentEvidenceBundle | null,
+  extraLimitations: readonly CorrelationLimitation[] = [],
+): CorrelationCandidateInput {
+  return {
+    session: projectSessionSummary(candidate.summary),
+    evidence,
+    repositoryMatch: candidate.repositoryMatch,
+    eligible: candidate.summary.sessionId !== null && candidate.repositoryMatch !== "incompatible",
+    references: [],
+    coverageLimitations: [...candidate.coverageLimitations, ...extraLimitations],
+  };
+}
+
+async function projectPreparedWorktreeCodex(
+  prepared: PreparedCodexEvidence,
+  target: WorktreeCorrelationTarget,
+): Promise<CorrelationResult> {
+  if (prepared.discovery.availability === "unavailable") {
+    return correlateWorktree(target, [], {
+      status: "unavailable",
+      discoveredRefs: prepared.discovery.refs.length,
+      usableSummaryRefs: 0,
+      incompatibleRefs: 0,
+      provenNotStrongRefs: 0,
+      potentiallyStrongRefs: 0,
+      fullyProjectedRefs: 0,
+      omittedPotentiallyStrongRefs: 0,
+      limitations: prepared.coverageLimitations,
+    });
+  }
+
+  const staged = prepared.candidates.map((candidate) => ({
+    candidate,
+    input: worktreeInput(candidate, null),
+  })).sort((left, right) => {
+    const rank = (value: CorrelationRepositoryMatch): number => {
+      switch (value) {
+        case "current-worktree": return 3;
+        case "linked-worktree": return 2;
+        case "same-common-directory": return 1;
+        default: return 0;
+      }
+    };
+    const repositoryOrder = rank(right.candidate.repositoryMatch) - rank(left.candidate.repositoryMatch);
+    if (repositoryOrder !== 0) return repositoryOrder;
+    const pathOrder = left.candidate.ref.sourcePath.localeCompare(right.candidate.ref.sourcePath);
+    return pathOrder !== 0
+      ? pathOrder
+      : (left.candidate.summary.sessionId ?? "").localeCompare(right.candidate.summary.sessionId ?? "");
+  });
+  const potentiallyStrong = staged.filter((value) =>
+    value.input.eligible
+      && (hasPatchEvidence(value.candidate.scan)
+        || value.candidate.scan.relevanceCoverage.status !== "complete"));
+  const selected = potentiallyStrong.slice(0, MAX_FULL_EVIDENCE_CANDIDATES);
+  const omitted = Math.max(potentiallyStrong.length - selected.length, 0);
+  const outcomes = await Promise.all(selected.map(async (value) => {
+    const rawBundle = scanBundle(value.candidate.scan);
+    try {
+      const evidence = await Promise.all(rawBundle.evidence.map((item) =>
+        projectWorktreeEvidence(item, rawBundle.session, target, prepared.git)));
+      return {
+        input: worktreeInput(value.candidate, {
+          ...rawBundle,
+          evidence,
+        }),
+        projected: true,
+      };
+    } catch {
+      return {
+        input: worktreeInput(value.candidate, null, [limitation("summary-coverage", true)]),
+        projected: false,
+      };
+    }
+  }));
+
+  const inputs = staged.map((value) => value.input);
+  selected.forEach((value, index) => {
+    const outcome = outcomes[index];
+    if (outcome !== undefined) {
+      const stagedIndex = staged.indexOf(value);
+      if (stagedIndex >= 0) inputs[stagedIndex] = outcome.input;
+    }
+  });
+  await verifyPreparedCodexEvidenceStable(prepared);
+  const stableVerifierAvailable = prepared.source.verifySourceSignature !== undefined;
+  const retainedSignatureMissing = selected.some((value) => value.candidate.scan.sourceSignature === null);
+  const stabilityLimitations = stableVerifierAvailable && !retainedSignatureMissing
+    ? []
+    : [limitation("summary-coverage", true)];
+  const limitations = [...prepared.coverageLimitations, ...stabilityLimitations];
+  if (omitted > 0) limitations.push(limitation("candidate-cap", true, omitted));
+  const projectedCount = outcomes.filter((value) => value.projected).length;
+  const usableSummaryRefs = prepared.candidates.filter((value) => value.summary.sessionId !== null).length;
+  const candidateCoverage = outcomes.flatMap((value) => value.input.coverageLimitations);
+  const status = prepared.discovery.availability === "limited"
+    || [...limitations, ...candidateCoverage].some((value) => value.material)
+    ? "limited" as const
+    : "complete" as const;
+  const result = correlateWorktree(target, inputs, {
+    status,
+    discoveredRefs: prepared.discovery.refs.length,
+    usableSummaryRefs,
+    incompatibleRefs: prepared.candidates.filter((value) => value.repositoryMatch === "incompatible").length,
+    provenNotStrongRefs: Math.max(staged.length - potentiallyStrong.length, 0),
+    potentiallyStrongRefs: potentiallyStrong.length,
+    fullyProjectedRefs: projectedCount,
+    omittedPotentiallyStrongRefs: omitted,
+    limitations,
+  });
+  return result;
+}
+
+export async function verifyPreparedCodexEvidenceStable(
+  prepared: PreparedCodexEvidence,
+): Promise<void> {
+  const closingDiscovery = await discover(prepared.source, undefined);
+  if (discoveryNamespaceChanged(prepared.discovery, closingDiscovery)) {
+    throw new OperationalError("agent history changed during worktree correlation");
+  }
+  const verifier = prepared.source.verifySourceSignature;
+  if (verifier === undefined) return;
+  for (const candidate of prepared.candidates) {
+    const signature = candidate.scan.sourceSignature;
+    if (signature === null) continue;
+    const stable = await verifier.call(prepared.source, candidate.ref, signature);
+    if (!stable) throw new OperationalError("agent history changed during worktree correlation");
+  }
+}
+
+export async function projectPreparedCodex(
+  prepared: PreparedCodexEvidence,
+  target: ProvenanceCorrelationTarget,
+  location: ResolvedCodeLocation,
+): Promise<CorrelationResult> {
+  return target.kind === "worktree"
+    ? projectPreparedWorktreeCodex(prepared, target)
+    : projectPreparedCommitCodex(prepared, target, location);
 }

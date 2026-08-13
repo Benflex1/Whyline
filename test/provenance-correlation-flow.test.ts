@@ -15,12 +15,17 @@ import type {
   AgentHistoryDiscoveryResult,
   AgentHistorySource,
   AgentEvidenceTarget,
+  AgentSourceSignature,
   AgentSessionRef,
   AgentSessionSummary,
 } from "../src/agents/agent-history-source.js";
 import { CodexHistorySource } from "../src/agents/codex/source.js";
 import { classifyStrongPossibility } from "../src/correlation/build-candidates.js";
 import { GitProcess } from "../src/git/git-process.js";
+import { discoverRepositoryContext } from "../src/git/repository-context.js";
+import { prepareCodexEvidence, projectPreparedCodex } from "../src/provenance/correlate-codex.js";
+import type { ResolvedCodeLocation } from "../src/provenance/model.js";
+import type { WorktreeCorrelationTarget } from "../src/correlation/model.js";
 import { analyzeLocation } from "../src/provenance/explain-location.js";
 import { CorrelationTelemetry, FIXED_METRIC_NAMES } from "../src/provenance/correlation-telemetry.js";
 import type { WhylineReport } from "../src/provenance/model.js";
@@ -150,6 +155,17 @@ function evidence(
           matchSide: "added",
           hunkRanges: [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: 2 }],
           lineCount: 2,
+          worktreeHunks: [{
+            oldStart: 0,
+            oldLines: 0,
+            newStart: 1,
+            newLines: lines.length,
+            matchSide: "added",
+            orderedLineFingerprints: fingerprints,
+            distinctiveLineFingerprints: fingerprints,
+            lineCount: lines.length,
+            truncated: false,
+          }],
         }],
       },
       commitIds: [],
@@ -169,6 +185,62 @@ function evidenceWithoutCwd(bundle: AgentEvidenceBundle): AgentEvidenceBundle {
       delete result.cwd;
       return result;
     }),
+  };
+}
+
+function worktreeTarget(
+  repository: Awaited<ReturnType<typeof discoverRepositoryContext>>,
+  lines: readonly string[],
+): WorktreeCorrelationTarget {
+  const fingerprints = lines.map(digestLine);
+  const alphanumeric = lines.map((line) => [...line].filter((value) => /[A-Za-z0-9]/.test(value)).length);
+  const hunk = {
+    oldPath: "src-target.ts",
+    newPath: "src-target.ts",
+    oldStart: 1,
+    oldLines: 1,
+    newStart: 1,
+    newLines: lines.length,
+    targetLineKind: "added" as const,
+    addedLineFingerprints: fingerprints,
+    deletedLineFingerprints: [],
+    distinctiveAddedLineFingerprints: fingerprints,
+    distinctiveDeletedLineFingerprints: [],
+    truncated: false,
+    basis: "derived" as const,
+    operation: "update" as const,
+    queriedSpans: [{ startLine: 1, endLine: lines.length }],
+    currentLineFingerprints: fingerprints,
+    currentDistinctiveLineFingerprints: fingerprints,
+    currentLineAlphanumericCounts: alphanumeric,
+    complete: true as const,
+  };
+  return {
+    kind: "worktree",
+    basis: "derived",
+    repository: {
+      worktreeRoot: repository.worktreeRoot,
+      gitDir: repository.gitDir,
+      commonGitDir: repository.commonGitDir,
+      objectFormat: repository.objectFormat,
+      worktrees: repository.worktrees.map((value) => ({
+        path: value.path,
+        commonGitDir: repository.commonGitDir,
+      })),
+    },
+    baseCommitId: repository.headCommit,
+    targetPath: "src-target.ts",
+    changeKind: "modified",
+    staging: "unstaged",
+    queriedSpans: [{ startLine: 1, endLine: lines.length }],
+    relevantHunks: [hunk],
+    targetSnapshot: {
+      baseCommitId: repository.headCommit,
+      repositoryPath: "src-target.ts",
+      changeKind: "modified",
+      fileSnapshot: { size: 100, mtimeMs: 1, ino: 2, dev: 3, digest: "current" },
+      evidenceDigest: "current-evidence",
+    },
   };
 }
 
@@ -255,6 +327,7 @@ async function writeRealCodexPatchTranscript(
 interface FakeAgentHistoryOptions {
   readonly availability?: AgentHistoryAvailability;
   readonly diagnostics?: readonly AgentDiagnostic[];
+  readonly sourceSignature?: AgentSourceSignature | null;
 }
 
 class FakeAgentHistorySource implements AgentHistorySource {
@@ -342,8 +415,15 @@ class FakeAgentHistorySource implements AgentHistorySource {
       },
       bytesRead: 0,
       recordsSeen: 0,
-      sourceSignature: null,
+      sourceSignature: this.options.sourceSignature ?? null,
     };
+  }
+
+  public async verifySourceSignature(
+    _ref: AgentSessionRef,
+    _signature: AgentSourceSignature,
+  ): Promise<boolean> {
+    return true;
   }
 
   public async readSummary(ref: AgentSessionRef): Promise<AgentSessionSummary> {
@@ -1356,6 +1436,62 @@ test("cwd-less evidence remains valid across linked worktrees sharing the common
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.repositoryMatch, "current-worktree");
   assert.equal(report.correlation?.coverage.status, "complete");
+});
+
+test("worktree projection requires exact current identity and maps nested cwd paths", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const worktreeProjectionAnchorAlpha = \"alpha-value\";";
+  const secondLine = "const worktreeProjectionAnchorBeta = \"beta-value\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), "baseline\n", "utf8");
+  const commit = await commitTarget(f);
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const nested = path.join(f.directory, "nested");
+  await mkdir(nested, { recursive: true });
+  const ref = reference(f, "worktree-exact");
+  const sessionValue = summary(ref, nested, commit);
+  const source = new FakeAgentHistorySource(
+    sessionValue,
+    evidence(sessionValue, [firstLine, secondLine], "../src-target.ts"),
+    { sourceSignature: { device: 1, inode: 2, size: 3, mtimeNs: 4n } },
+  );
+  const repository = await discoverRepositoryContext(f.runner, f.directory);
+  const prepared = await prepareCodexEvidence({ repository, git: f.runner, agentHistorySource: source });
+  const result = await projectPreparedCodex(
+    prepared,
+    worktreeTarget(repository, [firstLine, secondLine]),
+    {} as ResolvedCodeLocation,
+  );
+  assert.equal(result.status, "matched");
+  assert.equal(result.selected?.band, "strong");
+});
+
+test("linked worktree identity is never a positive worktree candidate", async (t) => {
+  const f = await fixture(t);
+  const firstLine = "const linkedProjectionAnchorAlpha = \"alpha-value\";";
+  const secondLine = "const linkedProjectionAnchorBeta = \"beta-value\";";
+  await writeFile(path.join(f.directory, "src-target.ts"), "baseline\n", "utf8");
+  const commit = await commitTarget(f);
+  await writeFile(path.join(f.directory, "src-target.ts"), `${firstLine}\n${secondLine}\n`, "utf8");
+  const linked = `${f.directory}-linked`;
+  t.after(async () => rm(linked, { recursive: true, force: true }));
+  await runGit(f, ["worktree", "add", "--detach", linked, commit]);
+  const ref = reference(f, "worktree-linked");
+  const sessionValue = summary(ref, linked, commit);
+  const source = new FakeAgentHistorySource(
+    sessionValue,
+    evidence(sessionValue, [firstLine, secondLine]),
+    { sourceSignature: { device: 1, inode: 2, size: 3, mtimeNs: 4n } },
+  );
+  const repository = await discoverRepositoryContext(f.runner, f.directory);
+  const prepared = await prepareCodexEvidence({ repository, git: f.runner, agentHistorySource: source });
+  const result = await projectPreparedCodex(
+    prepared,
+    worktreeTarget(repository, [firstLine, secondLine]),
+    {} as ResolvedCodeLocation,
+  );
+  assert.equal(result.status, "none");
+  assert.equal(result.selected, undefined);
+  assert.equal(result.alternatives.length, 0);
 });
 
 test("correction matrix 13: proof and cap inputs count deduplicated logical operations conservatively", async (t) => {

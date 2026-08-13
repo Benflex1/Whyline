@@ -43,6 +43,14 @@ const SIGNAL_TEXT: Record<CorrelationSignalKind, string> = {
   "structured-content-divergence": "structured patch content diverges from the attributed change",
 };
 
+const WORKTREE_SIGNAL_TEXT: Record<CorrelationSignalKind, string> = {
+  ...SIGNAL_TEXT,
+  "structured-patch-overlap": "successful structured patch exactly overlaps this current worktree change",
+  "exact-current-worktree": "record-level evidence has exact current-worktree identity",
+  "structured-patch-target-path": "successful structured patch targets this current worktree path",
+  "structured-content-divergence": "a later structured patch diverges from the current worktree material",
+};
+
 const LIMITATION_TEXT: Record<CorrelationLimitationKind, string> = {
   "empty-readable-store": "Codex history is readable but contains no sessions",
   "discovery-unavailable": "Codex history could not be read",
@@ -165,10 +173,13 @@ function allocateSessionIds(
   ]));
 }
 
-function candidateExplanations(candidate: CorrelationCandidate): readonly string[] {
+function candidateExplanations(
+  candidate: CorrelationCandidate,
+  signalText: Record<CorrelationSignalKind, string> = SIGNAL_TEXT,
+): readonly string[] {
   const explanations: string[] = [];
   for (const signal of [...candidate.signals, ...candidate.contradictions]) {
-    const text = SIGNAL_TEXT[signal.kind];
+    const text = signalText[signal.kind];
     if (!explanations.includes(text)) explanations.push(text);
     if (explanations.length === MAX_RENDERED_EXPLANATIONS) break;
   }
@@ -224,6 +235,50 @@ function possibleCandidate(result: CorrelationResult): CorrelationCandidate | nu
     : null;
 }
 
+function renderCorrelationWithText(
+  result: CorrelationResult,
+  signalText: Record<CorrelationSignalKind, string>,
+  statusText: Record<CorrelationResult["status"], string>,
+): string {
+  const lines = ["Codex evidence"];
+  const possibleText = (candidate: CorrelationCandidate): void => {
+    const id = allocateSessionIds([candidate]).get(candidate);
+    if (id === undefined) return;
+    lines.push(`  Possible related session: ${id}`);
+    const evidence = candidateExplanations(candidate, signalText);
+    if (evidence.length > 0) lines.push(`  Evidence: ${evidence.join("; ")}`);
+    lines.push("  Evidence is insufficient to claim a match.");
+  };
+  if (result.status === "matched" && result.selected !== undefined) {
+    if (result.selected.band === "strong") {
+      const id = allocateSessionIds([result.selected]).get(result.selected);
+      if (id !== undefined) {
+        lines.push(`  Likely related Codex session: ${id}`);
+        const evidence = candidateExplanations(result.selected, signalText);
+        if (evidence.length > 0) lines.push(`  Evidence: ${evidence.join("; ")}`);
+      } else {
+        lines.push(`  ${statusText[result.status]}`);
+      }
+    } else {
+      possibleText(result.selected);
+    }
+  } else if (result.status === "none") {
+    const possible = possibleCandidate(result);
+    if (possible !== null) possibleText(possible);
+    else {
+      lines.push(`  ${statusText[result.status]}`);
+      if (result.alternatives.length > 1) lines.push(...renderCandidateList(result.alternatives));
+    }
+  } else if (result.status === "ambiguous") {
+    lines.push(`  ${statusText[result.status]}`);
+    lines.push(...renderCandidateList(result.alternatives));
+  } else {
+    lines.push(`  ${statusText[result.status]}`);
+  }
+  lines.push(renderCoverage(result));
+  return lines.join("\n");
+}
+
 export function renderCorrelation(result: CorrelationResult): string {
   const lines = ["Codex evidence"];
 
@@ -265,6 +320,15 @@ export function renderCorrelation(result: CorrelationResult): string {
   return lines.join("\n");
 }
 
+export function renderWorktreeCorrelation(result: CorrelationResult): string {
+  return renderCorrelationWithText(result, WORKTREE_SIGNAL_TEXT, {
+    matched: "No reliable Codex session match found",
+    ambiguous: "Multiple strong candidates; no session selected",
+    none: "No reliable Codex session match found",
+    unavailable: "Codex history unavailable",
+  });
+}
+
 function summarySessionId(candidate: CorrelationCandidate): string | null {
   return allocateSessionIds([candidate]).get(candidate) ?? null;
 }
@@ -285,6 +349,38 @@ export function renderCorrelationSummary(result: CorrelationResult): string[] {
       lines.push(`  AI provenance: likely Codex session ${id}`);
       const evidence = summaryCandidateEvidence(result.selected);
       if (evidence !== null) lines.push(`    ${evidence}`);
+    } else {
+      lines.push(`  AI provenance: possible Codex session ${id}; evidence is insufficient to claim a match`);
+    }
+  } else if (result.status === "ambiguous") {
+    lines.push("  AI provenance: ambiguous; multiple strong Codex candidates");
+  } else if (result.status === "unavailable") {
+    lines.push("  AI provenance: unavailable");
+  } else {
+    const possible = possibleCandidate(result);
+    if (possible !== null) {
+      const id = summarySessionId(possible);
+      lines.push(id === null
+        ? "  AI provenance: no reliable Codex session match"
+        : `  AI provenance: possible Codex session ${id}; evidence is insufficient to claim a match`);
+    } else {
+      lines.push("  AI provenance: no reliable Codex match");
+    }
+  }
+  lines.push(`    ${renderCoverage(result).trim()}`);
+  return lines;
+}
+
+export function renderWorktreeCorrelationSummary(result: CorrelationResult): string[] {
+  const lines: string[] = [];
+  if (result.status === "matched" && result.selected !== undefined) {
+    const id = summarySessionId(result.selected);
+    if (id === null) {
+      lines.push("  AI provenance: no reliable Codex session match");
+    } else if (result.selected.band === "strong") {
+      lines.push(`  AI provenance: likely Codex session ${id}`);
+      const evidence = candidateExplanations(result.selected, WORKTREE_SIGNAL_TEXT);
+      if (evidence.length > 0) lines.push(`    ${evidence.join("; ")}`);
     } else {
       lines.push(`  AI provenance: possible Codex session ${id}; evidence is insufficient to claim a match`);
     }

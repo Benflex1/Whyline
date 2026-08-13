@@ -1,6 +1,9 @@
 import type { GitAncestryResult } from "../ancestry/model.js";
 import type { WhylineReport } from "../provenance/model.js";
-import { renderCorrelationSummary } from "./render-correlation.js";
+import {
+  renderCorrelationSummary,
+  renderWorktreeCorrelationSummary,
+} from "./render-correlation.js";
 import { sanitizeTerminalText } from "./render-text.js";
 
 function shortCommit(value: string): string {
@@ -46,12 +49,36 @@ export function renderSummary(report: WhylineReport): string {
     "",
     "Explanation",
   ];
-  if (report.provenance.commit === null || report.provenance.blame === null) {
+  if (report.worktreeCorrelation !== undefined) {
+    const worktree = report.worktreeCorrelation;
+    const lastTouch = worktree.changeKind === "added" && report.location.targetState === "untracked"
+      ? "  Textual last-touch: uncommitted; file is untracked"
+      : `  Textual last-touch: uncommitted; modified against HEAD ${shortCommit(worktree.baseCommitId)}`;
+    lines.push(lastTouch);
+    lines.push("  Git ancestry: not run for an uncommitted line");
+    if (worktree.construction === "insufficient") {
+      lines.push("  AI provenance: not established; worktree material is insufficient");
+      if (worktree.limitations[0] !== undefined) {
+        lines.push(`    ${sanitizeTerminalText(worktree.limitations[0])}`);
+      }
+    } else if (worktree.construction === "work-bound") {
+      lines.push("  AI provenance: unavailable / work-bound");
+    } else if (worktree.construction === "unavailable") {
+      lines.push("  AI provenance: unavailable");
+    } else if (worktree.result !== undefined) {
+      lines.push(...renderWorktreeCorrelationSummary(worktree.result));
+    } else {
+      lines.push("  AI provenance: not established");
+    }
+  } else if (report.provenance.commit === null || report.provenance.blame === null) {
     lines.push("  Textual last-touch: uncommitted");
   } else {
     lines.push(`  Textual last-touch: ${shortCommit(report.provenance.commit.id)} \"${sanitizeTerminalText(report.provenance.commit.subject)}\"`);
   }
-  lines.push(...renderAncestrySummary(report.ancestry));
+  if (report.worktreeCorrelation === undefined) lines.push(...renderAncestrySummary(report.ancestry));
+  if (report.worktreeCorrelation !== undefined) {
+    return lines.join("\n");
+  }
   if (report.correlation === undefined) {
     lines.push("  AI provenance: not run");
   } else {

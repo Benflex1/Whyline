@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag; leave empty for a non-publishing dry run"
+        required: false
+        type: string
+      publish:
+        description: "Publish the tested artifact (requires the release environment)"
+        required: false
+        default: false
+        type: boolean
+      release_only:
+        description: "Create the GitHub Release without republishing npm (recovery mode)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Prepare and test the tagged artifact
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.context.outputs.release_tag }}
+      run_release: ${{ steps.context.outputs.run_release }}
+      release_only: ${{ steps.context.outputs.release_only }}
+    steps:
+      # actions/checkout v6.0.0; push tags are checked out at the exact tag ref.
+      - name: Check out the release ref
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      # actions/setup-node v6.0.0
+      - name: Set up Node.js 24
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: 24
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate tag/version and checked-out identity
+        id: context
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_RELEASE_ONLY: ${{ inputs.release_only }}
+        run: |
+          set -euo pipefail
+          tag="$INPUT_TAG"
+          if [[ -z "$tag" && "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ "$INPUT_PUBLISH" == "true" && "$INPUT_RELEASE_ONLY" == "true" ]]; then
+            echo "publish and release_only cannot be requested together" >&2
+            exit 1
+          fi
+          if [[ "$INPUT_PUBLISH" == "true" || "$INPUT_RELEASE_ONLY" == "true" ]] && [[ -z "$tag" ]]; then
+            echo "a tag is required for a publishing or release-only dispatch" >&2
+            exit 1
+          fi
+
+          run_release=false
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            run_release=true
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && ( "$INPUT_PUBLISH" == "true" || "$INPUT_RELEASE_ONLY" == "true" ) ]]; then
+            run_release=true
+          fi
+
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "run_release=$run_release" >> "$GITHUB_OUTPUT"
+          echo "release_only=$INPUT_RELEASE_ONLY" >> "$GITHUB_OUTPUT"
+
+      - name: Run the required verification
+        run: npm run check
+
+      - name: Enforce tag/package version and exact commit invariant
+        if: steps.context.outputs.release_tag != ''
+        run: node scripts/release-preflight.mjs --tag "${{ steps.context.outputs.release_tag }}" --require-tag
+
+      - name: Check diff whitespace
+        run: git diff --check
+
+      - name: Create and accept the exact npm tarball
+        run: node scripts/package-acceptance.mjs --artifact-dir "$RUNNER_TEMP/release-artifact"
+
+      - name: Confirm one tested release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t artifacts < <(find "$RUNNER_TEMP/release-artifact" -maxdepth 1 -type f -name '*.tgz' -print)
+          test "${#artifacts[@]}" -eq 1
+
+      # actions/upload-artifact v4.6.2
+      - name: Retain the tested tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: whyline-tested-package
+          path: ${{ runner.temp }}/release-artifact/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-or-recover:
+    name: Publish tested artifact or recover GitHub Release
+    needs: prepare
+    if: needs.prepare.outputs.run_release == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      # actions/checkout v6.0.0; this is the same tag validated by prepare.
+      - name: Check out the exact release tag
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+          fetch-depth: 0
+
+      # actions/download-artifact v5.0.0
+      - name: Download the tested tarball
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: whyline-tested-package
+          path: ${{ runner.temp }}/tested-package
+
+      - name: Select exactly one tested tarball
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t artifacts < <(find "$RUNNER_TEMP/tested-package" -maxdepth 1 -type f -name '*.tgz' -print)
+          test "${#artifacts[@]}" -eq 1
+          echo "path=${artifacts[0]}" >> "$GITHUB_OUTPUT"
+
+      # actions/setup-node v6.0.0; writes the npmjs.org auth configuration.
+      - name: Set up Node.js 24 for publication
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Require configured release authentication
+        if: needs.prepare.outputs.release_only != 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TRUSTED_PUBLISHER: ${{ vars.NPM_TRUSTED_PUBLISHER }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$NPM_TOKEN" && "$NPM_TRUSTED_PUBLISHER" != "true" ]]; then
+            echo "Configure release.NPM_TOKEN for the first publish or set release.NPM_TRUSTED_PUBLISHER=true after npm trusted publishing is configured." >&2
+            exit 1
+          fi
+
+      # npm provenance uses the release job's id-token: write permission.
+      # The tarball path is the artifact produced and accepted by prepare.
+      - name: Publish the tested tarball to public npm
+        if: needs.prepare.outputs.release_only != 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.artifact.outputs.path }}" --access public --provenance
+
+      - name: Create the matching GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Whyline $RELEASE_TAG" --generate-notes

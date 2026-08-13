@@ -73,6 +73,19 @@ test("rejects source maps, test output, and unsafe archive paths", () => {
   }
 });
 
+test("rejects non-regular tar entry types even at allowed paths", () => {
+  assert.throws(
+    () => assertPackageEntries([
+      file("package.json"),
+      file("README.md"),
+      file("LICENSE"),
+      file("dist/src/cli/main.js"),
+      { path: "package/dist/src/cli/linked.js", kind: "other" },
+    ]),
+    /disallowed package path.*package\/dist\/src\/cli\/linked\.js/,
+  );
+});
+
 test("accepts only exact vX.Y.Z release tags", () => {
   assert.equal(versionFromReleaseTag("v0.1.0"), "0.1.0");
   assert.throws(() => versionFromReleaseTag("0.1"), /release tag must match/);

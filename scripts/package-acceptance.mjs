@@ -93,15 +93,23 @@ function parsePackResult(stdout) {
 }
 
 async function readArchiveEntries(tarballPath) {
-  const result = await run("tar", ["-tzf", tarballPath]);
+  const result = await run("tar", ["-tvzf", tarballPath]);
   return result.stdout
     .split(/\r?\n/)
-    .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0)
-    .map((entry) => ({
-      path: entry,
-      kind: entry.endsWith("/") ? "directory" : "file",
-    }));
+    .map((entry) => {
+      const pathStart = entry.indexOf("package/");
+      const pathValue = pathStart < 0 ? entry : entry.slice(pathStart);
+      const type = entry[0];
+      return {
+        path: pathValue,
+        kind: type === "d"
+          ? "directory"
+          : type === "-"
+            ? "file"
+            : "other",
+      };
+    });
 }
 
 async function readArchiveManifest(tarballPath) {

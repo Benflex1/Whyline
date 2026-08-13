@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -54,7 +54,7 @@ async function git(
 }
 
 async function makeGitFixture(t: test.TestContext): Promise<GitFixture> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "whyline-e2e-git-"));
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "whyline-e2e-git-")));
   const globalConfig = path.join(directory, "empty-gitconfig");
   const codexHome = path.join(directory, "synthetic-codex-home");
   await writeFile(globalConfig, "", "utf8");

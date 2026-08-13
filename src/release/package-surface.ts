@@ -1,6 +1,6 @@
 export interface PackageArchiveEntry {
   readonly path: string;
-  readonly kind: "file" | "directory";
+  readonly kind: "file" | "directory" | "other";
 }
 
 const REQUIRED_FILES = [
@@ -25,6 +25,7 @@ function isAllowedEntry(entry: PackageArchiveEntry): boolean {
     return normalized === "package"
       || normalized.startsWith("package/dist/src/");
   }
+  if (entry.kind !== "file") return false;
   return entry.path === "package/package.json"
     || entry.path === "package/README.md"
     || entry.path === "package/LICENSE"

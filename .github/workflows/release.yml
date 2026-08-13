@@ -32,6 +32,8 @@ jobs:
       release_tag: ${{ steps.context.outputs.release_tag }}
       run_release: ${{ steps.context.outputs.run_release }}
       release_only: ${{ steps.context.outputs.release_only }}
+      validated_commit: ${{ steps.context.outputs.validated_commit }}
+      artifact_sha256: ${{ steps.artifact_meta.outputs.sha256 }}
     steps:
       # actions/checkout v6.0.0; push tags are checked out at the exact tag ref.
       - name: Check out the release ref
@@ -82,6 +84,7 @@ jobs:
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
           echo "run_release=$run_release" >> "$GITHUB_OUTPUT"
           echo "release_only=$INPUT_RELEASE_ONLY" >> "$GITHUB_OUTPUT"
+          echo "validated_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Run the required verification
         run: npm run check
@@ -97,11 +100,13 @@ jobs:
         run: node scripts/package-acceptance.mjs --artifact-dir "$RUNNER_TEMP/release-artifact"
 
       - name: Confirm one tested release artifact
+        id: artifact_meta
         shell: bash
         run: |
           set -euo pipefail
           mapfile -t artifacts < <(find "$RUNNER_TEMP/release-artifact" -maxdepth 1 -type f -name '*.tgz' -print)
           test "${#artifacts[@]}" -eq 1
+          echo "sha256=$(sha256sum "${artifacts[0]}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       # actions/upload-artifact v4.6.2
       - name: Retain the tested tarball
@@ -112,10 +117,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish-or-recover:
-    name: Publish tested artifact or recover GitHub Release
+  publish:
+    name: Publish tested artifact and create GitHub Release
     needs: prepare
-    if: needs.prepare.outputs.run_release == 'true'
+    if: needs.prepare.outputs.run_release == 'true' && needs.prepare.outputs.release_only != 'true'
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -123,11 +128,11 @@ jobs:
       contents: write
       id-token: write
     steps:
-      # actions/checkout v6.0.0; this is the same tag validated by prepare.
-      - name: Check out the exact release tag
+      # actions/checkout v6.0.0; use the commit validated before artifact creation.
+      - name: Check out the validated release commit
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
         with:
-          ref: ${{ needs.prepare.outputs.release_tag }}
+          ref: ${{ needs.prepare.outputs.validated_commit }}
           fetch-depth: 0
 
       # actions/download-artifact v5.0.0
@@ -145,6 +150,19 @@ jobs:
           mapfile -t artifacts < <(find "$RUNNER_TEMP/tested-package" -maxdepth 1 -type f -name '*.tgz' -print)
           test "${#artifacts[@]}" -eq 1
           echo "path=${artifacts[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Recheck tag and artifact identity before publication
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          VALIDATED_COMMIT: ${{ needs.prepare.outputs.validated_commit }}
+          EXPECTED_SHA256: ${{ needs.prepare.outputs.artifact_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VALIDATED_COMMIT"
+          actual_tag_commit="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+          test "$actual_tag_commit" = "$VALIDATED_COMMIT"
+          actual_sha256="$(sha256sum "${{ steps.artifact.outputs.path }}" | cut -d' ' -f1)"
+          test "$actual_sha256" = "$EXPECTED_SHA256"
 
       # actions/setup-node v6.0.0; writes the npmjs.org auth configuration.
       - name: Set up Node.js 24 for publication
@@ -174,6 +192,38 @@ jobs:
         run: npm publish "${{ steps.artifact.outputs.path }}" --access public --provenance
 
       - name: Create the matching GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Whyline $RELEASE_TAG" --generate-notes
+
+  recover-github-release:
+    name: Recover GitHub Release without npm publication
+    needs: prepare
+    if: needs.prepare.outputs.run_release == 'true' && needs.prepare.outputs.release_only == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    permissions:
+      contents: write
+    steps:
+      # actions/checkout v6.0.0; recovery is still bound to the validated commit.
+      - name: Check out the validated release commit
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          ref: ${{ needs.prepare.outputs.validated_commit }}
+          fetch-depth: 0
+
+      - name: Recheck the existing tag identity
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          VALIDATED_COMMIT: ${{ needs.prepare.outputs.validated_commit }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$VALIDATED_COMMIT"
+          test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$VALIDATED_COMMIT"
+
+      - name: Create the matching GitHub Release without republishing
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}

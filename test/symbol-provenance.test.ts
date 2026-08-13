@@ -105,7 +105,7 @@ test("symbol analysis delegates one exact range to the existing engine", async (
   assert.equal(symbol.range.location.endLine, 3);
 });
 
-test("untracked symbols use current contents and remain outside Codex", async (t) => {
+test("untracked symbols use current contents and retain line-specific worktree analysis", async (t) => {
   const fixture = await makeFixture(t);
   await writeFile(path.join(fixture.directory, "README.md"), "fixture\n", "utf8");
   await runGit(fixture, ["add", "--", "README.md"]);
@@ -120,7 +120,8 @@ test("untracked symbols use current contents and remain outside Codex", async (t
   });
   assert.equal(report.range.location.targetState, "untracked");
   assert.equal(report.range.textualGroups.every((group) => group.state === "uncommitted"), true);
-  assert.equal(report.range.correlations.length, 0);
+  assert.equal(report.range.correlations.length, 1);
+  assert.equal(report.range.correlations[0]?.targetKind, "worktree");
 });
 
 test("symbol analysis keeps final source stability verification", async (t) => {

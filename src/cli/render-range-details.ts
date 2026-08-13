@@ -1,5 +1,5 @@
 import type { RangeAncestrySegment, RangeCorrelationGroup, RangeTextualGroup, WhylineRangeReport } from "../provenance/range-model.js";
-import { renderCorrelation } from "./render-correlation.js";
+import { renderCorrelation, renderWorktreeCorrelation } from "./render-correlation.js";
 import { sanitizeTerminalText } from "./render-text.js";
 
 const MAX_RENDERED_GROUPS = 64;
@@ -116,7 +116,10 @@ function renderCorrelationGroup(
     "    status: " + group.status,
   ];
   if (group.result !== undefined) {
-    lines.push(...renderCorrelation(group.result).split("\n").map((line) => "    " + line));
+    const rendered = group.targetKind === "worktree"
+      ? renderWorktreeCorrelation(group.result)
+      : renderCorrelation(group.result);
+    lines.push(...rendered.split("\n").map((line) => "    " + line));
   }
   for (const limitation of group.limitations) {
     lines.push("    limitation: " + sanitizeTerminalText(limitation));
@@ -164,21 +167,25 @@ export function renderRangeDetailsWithHeader(
   }
 
   lines.push("", "Codex provenance");
-  const correlationByGroup = new Map(report.correlations.map((value) => [value.groupId, value]));
+  const correlationByTextualGroup = new Map<string, readonly typeof report.correlations[number][]>();
+  for (const correlation of report.correlations) {
+    const existing = correlationByTextualGroup.get(correlation.textualGroupId) ?? [];
+    correlationByTextualGroup.set(correlation.textualGroupId, [...existing, correlation]);
+  }
   for (const textualGroup of visibleTextual) {
-    const correlation = correlationByGroup.get(textualGroup.id);
-    if (correlation === undefined) {
+    const correlations = correlationByTextualGroup.get(textualGroup.id) ?? [];
+    if (correlations.length === 0) {
       lines.push(...renderCorrelationGroup({
         groupId: textualGroup.id,
         analysisGroupId: textualGroup.id,
         textualGroupId: textualGroup.id,
-        targetKind: "commit",
+        targetKind: textualGroup.state === "uncommitted" ? "worktree" : "commit",
         spans: textualGroup.spans,
         status: "not-run",
         limitations: ["Uncommitted lines do not receive Codex attribution."],
       }));
     } else {
-      lines.push(...renderCorrelationGroup(correlation));
+      for (const correlation of correlations) lines.push(...renderCorrelationGroup(correlation));
     }
   }
   if (report.textualGroups.length > MAX_RENDERED_GROUPS) {
@@ -188,7 +195,9 @@ export function renderRangeDetailsWithHeader(
   lines.push("", "Analysis coverage");
   lines.push("  committed groups: " + report.coverage.committedGroups);
   lines.push("  deep analyzed groups: " + report.coverage.deepAnalyzedGroups);
+  lines.push("  ready worktree groups: " + report.coverage.readyWorktreeGroups);
   lines.push("  work-bound groups: " + report.coverage.workBoundGroups);
+  lines.push("  group-limit omissions: " + report.coverage.groupLimitOmissions);
   lines.push("  uncommitted groups: " + report.coverage.uncommittedGroups);
   lines.push("  Raw prompts, reasoning, commands, transcript paths, and patch payloads are omitted.");
   return lines.join("\n");

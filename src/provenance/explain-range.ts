@@ -1,19 +1,21 @@
-import { defaultGitProcess, requireGitSuccess, type GitRunner } from "../git/git-process.js";
+import { defaultGitProcess, type GitRunner } from "../git/git-process.js";
 import { blameRange } from "../git/blame-range.js";
-import { discoverRepositoryContext, readTargetStatus } from "../git/repository-context.js";
+import { discoverRepositoryContext } from "../git/repository-context.js";
 import { inspectRangeFacts } from "../git/inspect-range.js";
 import {
   createRangeAncestryTraceCache,
   traceRangeGroupAncestry,
 } from "../git/trace-range-ancestry.js";
 import {
-  currentLocationSnapshot,
+  resolveCurrentSource,
   resolveRangeLocation,
-  snapshotsEqual,
+  resolvedRangeLocationFromSource,
+  type CurrentSourceSnapshot,
 } from "../location/resolve-location.js";
 import { parseLocationQuery } from "../location/parse-location.js";
 import type { AgentHistorySource } from "../agents/agent-history-source.js";
 import { buildCorrelationTarget } from "./build-correlation-target.js";
+import type { WorktreeTargetConstruction } from "../correlation/model.js";
 import {
   prepareCodexEvidence,
   projectPreparedCodex,
@@ -30,12 +32,15 @@ import {
   groupTextualAttributions,
   type RangeAncestryCoverage,
   type RangeCorrelationGroup,
+  type RangeLineSpan,
   type RangeLineAttribution,
   type RangeLineInspection,
   type RangeTextualGroup,
   type WhylineRangeReport,
 } from "./range-model.js";
+import { inspectWorktreeChange } from "../git/inspect-worktree-change.js";
 import { OperationalError, InvalidInputError } from "../whyline-error.js";
+import { verifyAnalysisStability } from "./verify-analysis-stability.js";
 
 const UNCOMMITTED_OBJECT = "0000000000000000000000000000000000000000";
 const MAX_DEEP_GROUPS = 24;
@@ -51,6 +56,8 @@ export interface AnalyzeRangeOptions {
   readonly agentHistorySource?: AgentHistorySource;
   readonly codexHome?: string;
   readonly correlationTelemetry?: CorrelationTelemetry;
+  /** Invocation-local source reuse for symbol and range equivalence. */
+  readonly sourceSnapshot?: CurrentSourceSnapshot;
 }
 
 function uncommittedFact(
@@ -137,62 +144,18 @@ function notRunCoverage(
   };
 }
 
-async function verifyStableRangeState(
-  runner: GitRunner,
-  report: WhylineRangeReport,
-): Promise<void> {
-  const headResult = await requireGitSuccess(
-    runner,
-    ["rev-parse", "--verify", "HEAD"],
-    report.repository.worktreeRoot,
-    "analysis stability check",
-  );
-  const currentHead = headResult.stdout.toString("utf8").trim();
-  if (currentHead !== report.repository.headCommit) {
-    throw new OperationalError("repository changed during analysis");
-  }
-
-  const branchResult = await runner.run(
-    ["symbolic-ref", "-q", "--short", "HEAD"],
-    { cwd: report.repository.worktreeRoot },
-  );
-  if (branchResult.exitCode > 1) {
-    throw new OperationalError("analysis stability check could not determine the branch");
-  }
-  const currentBranch = branchResult.exitCode === 1
-    ? null
-    : branchResult.stdout.toString("utf8").trim();
-  if (currentBranch !== report.repository.branch) {
-    throw new OperationalError("repository changed during analysis");
-  }
-
-  let currentSnapshot;
-  try {
-    currentSnapshot = await currentLocationSnapshot(report.location);
-  } catch {
-    throw new OperationalError("repository changed during analysis");
-  }
-  if (!snapshotsEqual(currentSnapshot, report.location.fileSnapshot)) {
-    throw new OperationalError("repository changed during analysis");
-  }
-
-  const currentStatus = await readTargetStatus(
-    runner,
-    report.repository,
-    report.location.repositoryPath,
-  );
-  if (currentStatus.state !== report.location.targetState
-    || currentStatus.dirty !== report.location.targetDirty) {
-    throw new OperationalError("repository changed during analysis");
-  }
-}
-
 export async function analyzeResolvedRange(
   repository: RepositoryContext,
   location: ResolvedRangeCodeLocation,
   options: AnalyzeRangeOptions = {},
 ): Promise<WhylineRangeReport> {
   const runner = options.git ?? defaultGitProcess;
+  const source = options.sourceSnapshot ?? await resolveCurrentSource(
+    location.absolutePath,
+    repository,
+    runner,
+    options.currentDirectory ?? repository.worktreeRoot,
+  );
 
   const facts = location.targetState === "untracked"
     ? Array.from(
@@ -222,10 +185,14 @@ export async function analyzeResolvedRange(
   } else {
     inspections = await inspectRangeFacts(runner, repository, location, facts);
   }
+  const uncommittedLines = facts
+    .filter((fact) => fact.blame.uncommitted)
+    .map((fact) => fact.queryLine);
+  const worktreeInspection = uncommittedLines.length === 0
+    ? undefined
+    : await inspectWorktreeChange(runner, repository, source, uncommittedLines);
   const textualGroups = groupTextualAttributions(facts, inspections);
   const committedGroups = textualGroups.filter((group) => group.state === "committed");
-  const deepGroups = committedGroups.slice(0, MAX_DEEP_GROUPS);
-  const workBoundGroups = committedGroups.slice(MAX_DEEP_GROUPS);
   const ancestry = new Map<string, RangeAncestryCoverage>();
   const correlations: RangeCorrelationGroup[] = [];
   const ancestryCache = createRangeAncestryTraceCache();
@@ -238,6 +205,53 @@ export async function analyzeResolvedRange(
     ));
   }
 
+  interface WorktreeAnalysisGroup {
+    readonly groupId: string;
+    readonly textualGroup: RangeTextualGroup;
+    readonly spans: readonly RangeLineSpan[];
+    readonly construction: WorktreeTargetConstruction;
+  }
+
+  const worktreeGroups: WorktreeAnalysisGroup[] = [];
+  if (worktreeInspection !== undefined) {
+    worktreeInspection.constructions.forEach((construction, index) => {
+      const textualGroup = textualGroups.find((group) =>
+        group.state === "uncommitted"
+          && construction.queriedSpans.every((span) => group.spans.some((candidate) =>
+            span.startLine >= candidate.startLine && span.endLine <= candidate.endLine)));
+      if (textualGroup === undefined) return;
+      worktreeGroups.push({
+        groupId: `analysis-${textualGroup.id}-${index + 1}`,
+        textualGroup,
+        spans: construction.queriedSpans,
+        construction,
+      });
+    });
+  }
+
+  const committedAnalysisGroups = committedGroups.map((group) => ({
+    kind: "commit" as const,
+    groupId: group.id,
+    textualGroup: group,
+    spans: group.spans,
+  }));
+  const readyWorktreeGroups = worktreeGroups.filter((group) => group.construction.status === "ready");
+  const budgetGroups = [
+    ...committedAnalysisGroups,
+    ...readyWorktreeGroups.map((group) => ({
+      kind: "worktree" as const,
+      groupId: group.groupId,
+      textualGroup: group.textualGroup,
+      spans: group.spans,
+      construction: group.construction,
+    })),
+  ].sort((left, right) =>
+    (left.spans[0]?.startLine ?? Number.MAX_SAFE_INTEGER)
+      - (right.spans[0]?.startLine ?? Number.MAX_SAFE_INTEGER)
+      || left.groupId.localeCompare(right.groupId));
+  const deepGroups = budgetGroups.slice(0, MAX_DEEP_GROUPS);
+  const workBoundGroups = budgetGroups.slice(MAX_DEEP_GROUPS);
+
   let prepared;
   if (deepGroups.length > 0) {
     prepared = await prepareCodexEvidence({
@@ -249,59 +263,93 @@ export async function analyzeResolvedRange(
     });
   }
 
-  for (const group of deepGroups) {
+  for (const group of worktreeGroups.filter((value) => value.construction.status !== "ready")) {
+    const construction = group.construction;
+    if (construction.status === "ready") continue;
+    correlations.push({
+      groupId: group.groupId,
+      analysisGroupId: group.groupId,
+      textualGroupId: group.textualGroup.id,
+      targetKind: "worktree",
+      spans: group.spans,
+      status: construction.status,
+      limitations: construction.limitations,
+    });
+  }
+
+  for (const entry of deepGroups) {
+    const group = entry.textualGroup;
     const groupLocation = representativeLocation(location, group);
-    const groupTarget = buildCorrelationTarget(
-      repository,
-      groupLocation,
-      groupProvenance(location, group),
-    );
-    const ancestryPromise = traceRangeGroupAncestry(
-      runner,
-      repository,
-      location,
-      group,
-      ancestryCache,
-    );
+    if (entry.kind === "worktree") {
+      const construction = entry.construction;
+      if (prepared === undefined || construction.status !== "ready") {
+        correlations.push({
+          groupId: entry.groupId,
+          analysisGroupId: entry.groupId,
+          textualGroupId: group.id,
+          targetKind: "worktree",
+          spans: entry.spans,
+          status: "not-run",
+          limitations: ["Codex projection was not available for this worktree group."],
+        });
+      } else {
+        const result = await projectPreparedCodex(prepared, construction.target, groupLocation);
+        correlations.push({
+          groupId: entry.groupId,
+          analysisGroupId: entry.groupId,
+          textualGroupId: group.id,
+          targetKind: "worktree",
+          spans: entry.spans,
+          status: result.status,
+          result,
+          limitations: result.coverage.limitations
+            .filter((limitation) => limitation.material)
+            .map((limitation) => limitation.kind),
+        });
+      }
+      continue;
+    }
+
+    const groupTarget = buildCorrelationTarget(repository, groupLocation, groupProvenance(location, group));
+    const ancestryPromise = traceRangeGroupAncestry(runner, repository, location, group, ancestryCache);
     const correlationPromise = prepared === undefined || groupTarget === null
       ? Promise.resolve<RangeCorrelationGroup>({
-        groupId: group.id,
-        analysisGroupId: group.id,
+        groupId: entry.groupId,
+        analysisGroupId: entry.groupId,
         textualGroupId: group.id,
         targetKind: "commit",
-        spans: group.spans,
+        spans: entry.spans,
         status: "not-run",
         limitations: ["Codex projection was not available for this committed group."],
       })
       : projectPreparedCodex(prepared, groupTarget, groupLocation).then((result) => ({
-        groupId: group.id,
-        analysisGroupId: group.id,
+        groupId: entry.groupId,
+        analysisGroupId: entry.groupId,
         textualGroupId: group.id,
         targetKind: "commit" as const,
-        spans: group.spans,
+        spans: entry.spans,
         status: result.status,
         result,
         limitations: result.coverage.limitations
           .filter((limitation) => limitation.material)
           .map((limitation) => limitation.kind),
       }));
-    const [groupAncestry, groupCorrelation] = await Promise.all([
-      ancestryPromise,
-      correlationPromise,
-    ]);
+    const [groupAncestry, groupCorrelation] = await Promise.all([ancestryPromise, correlationPromise]);
     ancestry.set(group.id, groupAncestry);
     correlations.push(groupCorrelation);
   }
 
-  for (const group of workBoundGroups) {
-    const message = "Deep ancestry and Codex analysis was omitted by the 24 committed textual-group work bound.";
-    ancestry.set(group.id, notRunCoverage(group, "work-bound", message));
+  for (const entry of workBoundGroups) {
+    const message = "Deep ancestry and Codex analysis was omitted by the shared 24-analysis-group work bound.";
+    if (entry.kind === "commit") {
+      ancestry.set(entry.textualGroup.id, notRunCoverage(entry.textualGroup, "work-bound", message));
+    }
     correlations.push({
-      groupId: group.id,
-      analysisGroupId: group.id,
-      textualGroupId: group.id,
-      targetKind: "commit",
-      spans: group.spans,
+      groupId: entry.groupId,
+      analysisGroupId: entry.groupId,
+      textualGroupId: entry.textualGroup.id,
+      targetKind: entry.kind,
+      spans: entry.spans,
       status: "work-bound",
       limitations: [message],
     });
@@ -321,12 +369,25 @@ export async function analyzeResolvedRange(
     coverage: {
       committedGroups: committedGroups.length,
       deepAnalyzedGroups: deepGroups.length,
+      readyWorktreeGroups: readyWorktreeGroups.length,
       workBoundGroups: workBoundGroups.length,
+      groupLimitOmissions: workBoundGroups.length,
       uncommittedGroups: textualGroups.filter((group) => group.state === "uncommitted").length,
     },
   };
   await options.hooks?.beforeFinalVerification?.(report);
-  await verifyStableRangeState(runner, report);
+  await verifyAnalysisStability({
+    runner,
+    repository,
+    location,
+    ...(worktreeInspection === undefined ? {} : {
+      worktree: [{
+        queriedLines: uncommittedLines,
+        evidenceDigest: worktreeInspection.evidenceDigest,
+      }],
+    }),
+    ...(prepared === undefined ? {} : { preparedCodex: prepared }),
+  });
   return report;
 }
 
@@ -341,6 +402,7 @@ export async function analyzeRange(
   const runner = options.git ?? defaultGitProcess;
   const currentDirectory = options.currentDirectory ?? process.cwd();
   const repository = await discoverRepositoryContext(runner, currentDirectory);
-  const location = await resolveRangeLocation(parsed, repository, runner, currentDirectory);
-  return analyzeResolvedRange(repository, location, options);
+  const source = await resolveCurrentSource(parsed.file, repository, runner, currentDirectory);
+  const location = resolvedRangeLocationFromSource(parsed, source);
+  return analyzeResolvedRange(repository, location, { ...options, sourceSnapshot: source });
 }

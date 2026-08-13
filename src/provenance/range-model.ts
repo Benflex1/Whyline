@@ -108,7 +108,9 @@ export interface RangeCorrelationGroup {
 export interface RangeAnalysisCoverage {
   readonly committedGroups: number;
   readonly deepAnalyzedGroups: number;
+  readonly readyWorktreeGroups: number;
   readonly workBoundGroups: number;
+  readonly groupLimitOmissions: number;
   readonly uncommittedGroups: number;
 }
 

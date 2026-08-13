@@ -174,7 +174,9 @@ function report(
     coverage: {
       committedGroups: groups.filter((value) => value.state === "committed").length,
       deepAnalyzedGroups: correlations.filter((value) => value.status !== "work-bound").length,
+      readyWorktreeGroups: 0,
       workBoundGroups: correlations.filter((value) => value.status === "work-bound").length,
+      groupLimitOmissions: correlations.filter((value) => value.status === "work-bound").length,
       uncommittedGroups: groups.filter((value) => value.state === "uncommitted").length,
     },
   };

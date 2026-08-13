@@ -39,6 +39,6 @@ export async function analyzeSymbol(
     endLine: symbol.endLine,
   };
   const location = resolvedRangeLocationFromSource(rangeQuery, source);
-  const range = await analyzeResolvedRange(repository, location, options);
+  const range = await analyzeResolvedRange(repository, location, { ...options, sourceSnapshot: source });
   return { selector, symbol, range };
 }

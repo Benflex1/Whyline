@@ -270,7 +270,7 @@ function findAnchor(
   }
 
   if (candidates.length === 0) return "insufficient";
-  
+
   const unique = new Map(
     candidates.map((candidate) => [
       candidate.childStartLine + ":" + candidate.parentStartLine,

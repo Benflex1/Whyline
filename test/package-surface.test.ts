@@ -21,6 +21,7 @@ interface PackageManifest {
   readonly files?: readonly string[];
   readonly bin?: { readonly whyline?: string };
   readonly engines?: { readonly node?: string };
+  readonly scripts?: { readonly prepack?: string };
 }
 
 async function readPackageManifest(): Promise<PackageManifest> {
@@ -45,6 +46,7 @@ test("package manifest exposes the approved public release metadata", async () =
   assert.deepEqual(manifest.files, ["dist/src/**/*.js", "README.md", "LICENSE"]);
   assert.deepEqual(manifest.bin, { whyline: "dist/src/cli/main.js" });
   assert.deepEqual(manifest.engines, { node: ">=24" });
+  assert.equal(manifest.scripts?.prepack, "npm run build");
   assert.ok(manifest.keywords?.includes("provenance"));
   assert.ok(manifest.keywords?.includes("codex"));
 });

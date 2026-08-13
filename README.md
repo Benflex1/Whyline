@@ -22,6 +22,12 @@ npm install --global whyline
 
 Whyline requires Node.js 24 or newer and Git 2.36 or newer. v0.1.0 supports Linux and macOS. Windows is explicitly unsupported and untested for this release.
 
+For a one-shot invocation without a global install:
+
+```sh
+npx --yes whyline src/parser.ts:42
+```
+
 ## Usage
 
 Run a line query from inside a Git worktree:
@@ -44,6 +50,8 @@ Locations are one-based. Paths may be repository-relative or absolute, but must 
 
 Use `--details` when you need bounded forensic material such as commit metadata, changed paths, relevant hunks, ancestry proof, correlation signals, and limitations. Use `--help` for the installed command’s concise syntax and support summary; use `--version` to print the installed package version.
 
+Codex history discovery uses `$CODEX_HOME` when it is set; otherwise it uses the normal local `~/.codex` home.
+
 ## What the result means
 
 Whyline starts with the line’s current Git state and textual last-touch attribution. When the material is sufficient, it can additionally report:
@@ -60,6 +68,10 @@ An ambiguous, unavailable, limited, or missing evidence domain does not invalida
 Whyline v0.1.0 does not claim authorship, causation, or semantic symbol identity across history. It does not search the web or a remote repository, fetch Git data, execute commands found in Codex transcripts, expose prompts or reasoning, maintain a persistent index, provide a web UI or daemon, or support Windows. A dirty or untracked line is not treated as Git-committed authorship; when current worktree material is sufficient, Whyline can correlate that change with local Codex history without claiming that an agent authored or caused it.
 
 Codex correlation is local and optional. It depends on readable, supported local session history; disabled, deleted, rotated, inaccessible, truncated, or unsupported history remains unavailable or limited rather than guessed.
+
+## Privacy and locality
+
+Analysis is local: Whyline has no telemetry, account, or server; it does not fetch remote Git data or perform network lookups for provenance analysis; and it keeps no persistent provenance index. Reports do not dump raw prompts, reasoning, transcripts, command output, or credentials.
 
 ## Exit codes
 

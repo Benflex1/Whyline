@@ -42,6 +42,11 @@ test("compiled CLI help is successful and describes the public release surface",
   assert.match(result.stdout, /--details/);
   assert.match(result.stdout, /--symbol <selector> <file>/);
   assert.match(result.stdout, /--version/);
+  assert.match(result.stdout, /Examples:/);
+  assert.match(result.stdout, /whyline src\/parser\.ts:42/);
+  assert.match(result.stdout, /whyline src\/parser\.ts:40-55/);
+  assert.match(result.stdout, /whyline --symbol parseExpression src\/parser\.ts/);
+  assert.match(result.stdout, /whyline --details src\/parser\.ts:42/);
   assert.match(result.stdout, /Node\.js 24\+/);
   assert.match(result.stdout, /Git 2\.36\+/);
   assert.match(result.stdout, /Linux and macOS/);

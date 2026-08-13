@@ -1791,13 +1791,9 @@ async function projectWorktreeEvidence(
   const directory = identity.directory || directories[0] || summary.initialCwd || target.repository.worktreeRoot;
   const projectChange = (change: NonNullable<typeof evidence.patch>["changes"][number]) => {
     const normalizedPath = worktreePath(change.path, directory, target);
-    const normalizedMovedFrom = change.movedFrom === undefined
-      ? undefined
-      : worktreePath(change.movedFrom, directory, target);
-    const next = normalizedPath === null ? change : { ...change, path: normalizedPath };
-    return normalizedMovedFrom === undefined
-      ? next
-      : { ...next, movedFrom: normalizedMovedFrom ?? change.movedFrom };
+    if (normalizedPath === null) return change;
+    const { movedFrom: _movedFrom, ...withoutOldPath } = change;
+    return { ...withoutOldPath, path: normalizedPath };
   };
   const patch = evidence.patch === undefined
     ? undefined

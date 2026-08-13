@@ -133,8 +133,7 @@ function limitationsFor(
     if (!limitations.some((current) => current.kind === value.kind)) limitations.push(value);
   };
   const relevant = records.filter((record) =>
-    record.change.path === target.targetPath
-      || record.change.movedFrom === target.targetPath);
+    record.change.path === target.targetPath);
   for (const record of relevant) {
     if (record.evidence.worktreeIdentity === "unknown"
       || record.evidence.worktreeIdentity === undefined) {

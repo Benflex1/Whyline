@@ -501,6 +501,20 @@ test("linked worktrees and detached HEAD are represented in repository context",
   await gitChecked(f, ["worktree", "remove", "--force", linked]);
 });
 
+test("repository paths remain valid when reached through a symlinked directory", async (t) => {
+  const f = await fixture(t);
+  await writeFixtureFile(f.directory, "symlinked.ts", "stable through an equivalent directory path\n");
+  const commit = await commitFixture(f, "symlinked: establish file", "2026-08-13T00:00:00Z");
+  const alias = path.join(path.dirname(f.directory), "whyline-symlinked-directory");
+  await symlink(f.directory, alias);
+  t.after(async () => rm(alias, { recursive: true, force: true }));
+
+  const report = await analyze(f, "symlinked.ts", 1, { currentDirectory: alias });
+
+  assert.equal(commitId(report), commit);
+  assert.equal(report.location.repositoryPath, "symlinked.ts");
+});
+
 test("shallow history returns commit facts with an explicit incomplete-history limitation", async (t) => {
   const source = await fixture(t);
   await writeFixtureFile(source.directory, "shallow.ts", "first\nsecond\n");

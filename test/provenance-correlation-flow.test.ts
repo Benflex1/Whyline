@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -53,7 +53,7 @@ async function runGit(
 }
 
 async function fixture(t: test.TestContext): Promise<Fixture> {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "whyline-correlation-flow-"));
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "whyline-correlation-flow-")));
   const config = path.join(directory, "gitconfig");
   await writeFile(config, "", "utf8");
   const runner = new GitProcess({
@@ -890,7 +890,8 @@ test("a deleted prunable linked worktree remains a linked repository match", asy
 
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.repositoryMatch, "linked-worktree");
-  assert.equal(report.repository.worktrees.some((worktree) => worktree.path === linked && worktree.prunable), true);
+  const canonicalLinked = path.join(await realpath(linkedParent), "linked");
+  assert.equal(report.repository.worktrees.some((worktree) => worktree.path === canonicalLinked && worktree.prunable), true);
 });
 
 test("committed correlation preserves availability states", async (t) => {

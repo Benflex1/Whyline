@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 import { parseArguments } from "./parse-arguments.js";
@@ -52,8 +53,18 @@ export async function runCli(argv: readonly string[]): Promise<number> {
   }
 }
 
-const invoked = process.argv[1];
-if (invoked !== undefined && import.meta.url === pathToFileURL(invoked).href) {
+function isInvokedEntryPoint(invoked: string | undefined): boolean {
+  if (invoked === undefined) return false;
+  try {
+    return pathToFileURL(realpathSync(invoked)).href === pathToFileURL(
+      realpathSync(new URL(import.meta.url)),
+    ).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isInvokedEntryPoint(process.argv[1])) {
   void runCli(process.argv.slice(2)).then((exitCode) => {
     process.exitCode = exitCode;
   });

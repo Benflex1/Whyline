@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
@@ -494,11 +494,25 @@ test("linked worktrees and detached HEAD are represented in repository context",
   await gitChecked(f, ["worktree", "add", "--detach", linked, commit]);
 
   const linkedReport = await analyze(f, path.join(linked, "worktree.ts"), 1, { currentDirectory: linked });
-  assert.equal(linkedReport.repository.worktreeRoot, linked);
+  assert.equal(linkedReport.repository.worktreeRoot, await realpath(linked));
   assert.notEqual(linkedReport.repository.gitDir, linkedReport.repository.commonGitDir);
   assert.ok(linkedReport.repository.worktrees.length >= 2);
   assert.equal(linkedReport.repository.branch, null);
   await gitChecked(f, ["worktree", "remove", "--force", linked]);
+});
+
+test("repository paths remain valid when reached through a symlinked directory", async (t) => {
+  const f = await fixture(t);
+  await writeFixtureFile(f.directory, "symlinked.ts", "stable through an equivalent directory path\n");
+  const commit = await commitFixture(f, "symlinked: establish file", "2026-08-13T00:00:00Z");
+  const alias = path.join(path.dirname(f.directory), "whyline-symlinked-directory");
+  await symlink(f.directory, alias);
+  t.after(async () => rm(alias, { recursive: true, force: true }));
+
+  const report = await analyze(f, "symlinked.ts", 1, { currentDirectory: alias });
+
+  assert.equal(commitId(report), commit);
+  assert.equal(report.location.repositoryPath, "symlinked.ts");
 });
 
 test("shallow history returns commit facts with an explicit incomplete-history limitation", async (t) => {

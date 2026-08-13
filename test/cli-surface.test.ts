@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -63,4 +63,21 @@ test("compiled CLI reads its packaged version from an unrelated working director
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
   assert.equal(result.stdout, "0.1.0\n");
+});
+
+test("CLI runs when Node is given npm's symlinked bin path", async (t) => {
+  const unrelatedDirectory = await mkdtemp(path.join(os.tmpdir(), "whyline-cli-bin-"));
+  t.after(async () => rm(unrelatedDirectory, { recursive: true, force: true }));
+
+  const binDirectory = path.join(unrelatedDirectory, "node_modules", ".bin");
+  await mkdir(binDirectory, { recursive: true });
+  const cliPath = path.resolve(process.cwd(), "dist/src/cli/main.js");
+  const binPath = path.join(binDirectory, "whyline");
+  await symlink(cliPath, binPath);
+
+  const result = await command([binPath, "--help"], unrelatedDirectory);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.match(result.stdout, /Usage:/);
 });

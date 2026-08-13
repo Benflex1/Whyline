@@ -119,7 +119,21 @@ async function resolveCanonicalPath(
   candidatePath: string,
   runner: GitRunner,
 ): Promise<string> {
-  if (!isWithinDirectory(context.worktreeRoot, candidatePath)) {
+  const candidateIsWithin = isWithinDirectory(context.worktreeRoot, candidatePath);
+  let canonicalParent: string;
+  try {
+    canonicalParent = await realpath(path.dirname(candidatePath));
+  } catch {
+    if (!candidateIsWithin) {
+      throw new InvalidInputError("target path is outside the selected worktree");
+    }
+    throw new InvalidInputError("target file does not exist");
+  }
+  // macOS exposes some temporary paths through a lexical alias (for example
+  // /var -> /private/var). Compare the canonical parent as well so an
+  // equivalent path to this worktree is accepted without allowing an outside
+  // directory symlink to smuggle a target into it.
+  if (!candidateIsWithin && !isWithinDirectory(context.worktreeRoot, canonicalParent)) {
     throw new InvalidInputError("target path is outside the selected worktree");
   }
 

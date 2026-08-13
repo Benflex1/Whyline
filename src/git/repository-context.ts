@@ -94,6 +94,28 @@ function parseWorktreeRecord(tokens: readonly string[]): WorktreeInfo | null {
     : { path: worktreePath, headCommit, branch, detached, bare, locked, prunable };
 }
 
+async function canonicalizePathWithExistingParent(value: string): Promise<string> {
+  const target = path.resolve(value);
+  let candidate = target;
+  while (true) {
+    try {
+      const canonical = await realpath(candidate);
+      return path.resolve(canonical, path.relative(candidate, target));
+    } catch {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) return target;
+      candidate = parent;
+    }
+  }
+}
+
+async function canonicalizeWorktreePath(worktree: WorktreeInfo): Promise<WorktreeInfo> {
+  // Prunable worktrees may no longer exist. Canonicalizing the nearest
+  // existing parent still resolves macOS aliases while retaining the missing
+  // suffix needed for bounded deleted-worktree correlation.
+  return { ...worktree, path: await canonicalizePathWithExistingParent(worktree.path) };
+}
+
 export function parseWorktreeList(value: Buffer): WorktreeInfo[] {
   const tokens = decodeGitUtf8(value).split("\u0000");
   const records: WorktreeInfo[] = [];
@@ -215,6 +237,10 @@ export async function discoverRepositoryContext(
     "worktree mapping discovery",
   );
 
+  const worktrees = await Promise.all(
+    parseWorktreeList(worktreeResult.stdout).map(canonicalizeWorktreePath),
+  );
+
   return {
     worktreeRoot,
     gitDir,
@@ -223,7 +249,7 @@ export async function discoverRepositoryContext(
     isShallow: parseBooleanLine(isShallowResult.stdout, "shallow repository check"),
     headCommit: singleLine(headResult.stdout, "HEAD"),
     branch,
-    worktrees: parseWorktreeList(worktreeResult.stdout),
+    worktrees,
   };
 }
 

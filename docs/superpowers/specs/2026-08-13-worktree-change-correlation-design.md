@@ -106,8 +106,7 @@ interface WorktreeCorrelationTarget {
   readonly repository: CorrelationRepositoryIdentity;
   readonly baseCommitId: string;
   readonly targetPath: string;
-  readonly pathAliases: readonly string[];
-  readonly changeKind: "modified" | "added" | "renamed-and-modified";
+  readonly changeKind: "modified" | "added";
   readonly staging: "staged" | "unstaged" | "partially-staged" | "untracked" | "unknown";
   readonly queriedSpans: readonly RangeLineSpan[];
   readonly relevantHunks: readonly WorktreeCorrelationHunk[];
@@ -147,7 +146,6 @@ interface WorktreeCorrelationHunk extends CorrelationHunk {
 interface WorktreeTargetSnapshot {
   readonly baseCommitId: string;
   readonly repositoryPath: string;
-  readonly pathAliases: readonly string[];
   readonly changeKind: WorktreeCorrelationTarget["changeKind"];
   readonly fileSnapshot: FileSnapshot;
   /** Digest of bounded path/change/hunk coordinates and fingerprints. */
@@ -266,7 +264,6 @@ type WorktreeTargetConstruction =
       readonly reason:
         | "unmerged"
         | "unsupported-change-shape"
-        | "ambiguous-path-change"
         | "missing-head-object"
         | "incomplete-diff";
       readonly limitations: readonly string[];
@@ -302,9 +299,9 @@ the typed outcomes above.
 Inspection consumes the invocation's already resolved current file snapshot and
 the invocation `RepositoryContext.headCommit`. It never reads the index as a
 content target. It determines whether the path exists in `HEAD`, whether it is
-present at index stage zero for diagnostics, and whether Git reports one
-connected rename. It then compares `HEAD` directly with final working-tree
-content.
+present at index stage zero for diagnostics, and then compares `HEAD` directly
+with final working-tree content at that same current path. It performs no
+old-path discovery.
 
 The cases are frozen as follows:
 
@@ -317,9 +314,6 @@ The cases are frozen as follows:
 | Path absent from `HEAD`, stage-zero index entry present | Treat final current content as `added`; staging is diagnostic only. |
 | Intent-to-add or unstaged new path | Treat as `added` when safe final current content is available. |
 | Path absent from both `HEAD` and index | Treat as `added` with `staging: "untracked"`. |
-| One directly observed rename plus content edits | Accept old path as one alias and analyze only added current-side lines. |
-| Pure worktree rename with no changed current lines | `insufficient / query-not-current-side-change`; do not claim line provenance from the rename. |
-| Copy or multiple/ambiguous path relationships | `unavailable / unsupported-change-shape` or `ambiguous-path-change`. |
 | Deleted path | Remains invalid in the current location model because no current file can be queried. |
 | Unmerged path | `unavailable / unmerged`; no parent or side is selected. |
 | Binary or invalid UTF-8 current file | Existing input error, exit 2. |
@@ -332,19 +326,36 @@ The current `TargetFileState` may continue classifying a staged addition as
 the more precise `changeKind` and optional staging diagnostic; it does not
 reinterpret `GitProvenance` as committed.
 
-### Path mapping and renames
+### Current-path-only semantics and deferred renames
 
-Path aliases contain the canonical current repository path and, only when Git's
-machine-readable `HEAD -> worktree` path change reports exactly one connected
-rename, its old `HEAD` path. No copy detection, basename matching, filesystem
-search, repository-wide diff, or similarity search outside Git's directly
-reported rename is allowed.
+A worktree target has exactly one path: the canonical current repository path.
+Whyline does not discover, retain, compare, or render an old path or worktree
+path alias in this milestone. Path-scoped inspection cannot establish the
+unknown old side of a rename, and no Codex path may supply that missing Git
+fact.
 
-A rename is operation-compatible only with one structured update change whose
-normalized `path` is the new path and whose `movedFrom` is the old path. An
-agent add/delete pair, an update naming only an unrelated alias, or a Git copy
-does not become rename evidence. Output says “connected rename path,” never
-that Codex intended or performed a rename.
+If the current path is absent from `HEAD`, Whyline analyzes the current path and
+content as current-side `added` material. This says only that the current path
+and content are absent from the invocation `HEAD`; it does not establish that
+the file was historically created rather than renamed, copied, or otherwise
+introduced.
+
+`movedFrom` has no semantic role in worktree correlation in this milestone. A
+normalized change carrying it is projected as though that field were absent. It
+may participate only when its remaining new-path evidence independently
+satisfies an ordinary `modified` or `added` rule: exact current path, supported
+operation/payload, query-local hunk, exact ordered overlap, and every normal
+coverage gate. The old path contributes no alias, compatibility, score,
+divergence, or supersession fact. If the ordinary current-path projection is
+unsupported, incomplete, or cannot be classified without the old path, the
+change contributes no signal and adds the existing material `summary-coverage`
+limitation (`unclassified-patch-change` at the adapter relevance boundary)
+when it could affect the target. It never becomes a negative fact.
+
+Worktree rename provenance or correspondence is explicitly deferred to a
+future milestone with its own bounded old-path discovery design. Committed Git
+rename behavior, exact ancestry, and transformed direct-parent declaration
+correspondence remain unchanged.
 
 ## Hunk and query locality
 
@@ -439,7 +450,7 @@ add/update/delete table:
 | `modified` | `update` + `unified-diff` | added side | Exactly one compatible patch hunk and query-covering exact alignment. |
 | `added` | `add` + `content` | content | Query-local exact alignment; no whole-file promotion. |
 | `added` | later `update` + `unified-diff` | added side | Hunk coordinates and exact alignment cover the queried final region. |
-| `renamed-and-modified` | `update` + `unified-diff` + exact `movedFrom` | added side | Connected Git old/new alias and query-covering alignment. |
+| Any current target | any patch change with `movedFrom` | field ignored | May use only independently complete ordinary current-path update/add evidence; the old path contributes nothing. |
 | Any current target | `delete`, `unknown`, deleted side, attempt only, or unrecovered payload | none | Cannot be strong. |
 
 The queried current line must be an added/current-side line. Deleted-side text
@@ -493,7 +504,8 @@ A worktree candidate is **strong** if and only if all of the following hold:
    supported structured patch result;
 2. the contributing patch record has exact current-worktree identity;
 3. the patch operation is compatible with the worktree target;
-4. its normalized path matches the target path or the one connected rename;
+4. its normalized current `path` exactly matches the target path; any
+   `movedFrom` value is ignored and contributes no evidence;
 5. exactly one compatible patch hunk is local to the target hunk/region;
 6. the pure overlap proof finds a unique contiguous exact alignment containing
    every queried line in the group;
@@ -557,8 +569,8 @@ operation-compatible, target-related structured patch results.
 
 For one candidate session:
 
-1. collect complete supported changes for the exact target path/alias in source
-   record order;
+1. project complete supported changes onto the exact current target path in
+   source record order, discarding any `movedFrom` value;
 2. identify changes whose patch hunk is local to the current target region;
 3. a complete later change that has at least two distinctive lines, is local to
    the same target region, and disagrees with final current material is a
@@ -692,16 +704,16 @@ Before any successful report is rendered, Whyline must verify:
 5. size, mtime, inode, device, and full source digest equal the retained
    `FileSnapshot`;
 6. target status remains compatible with the retained state;
-7. rerunning bounded worktree inspection yields the same path aliases,
-   change kind, queried hunk coordinates, ordered fingerprints, completeness,
-   and `evidenceDigest`; and
+7. rerunning bounded worktree inspection yields the same current path, change
+   kind, queried hunk coordinates, ordered fingerprints, completeness, and
+   `evidenceDigest`; and
 8. Codex transcript signatures and discovery namespace remain stable under the
    existing correlation checks.
 
 An index-only stage/unstage operation does not invalidate a result when the
 final `HEAD -> worktree` evidence digest is identical; the index has no
-provenance semantics. If staging changes path inclusion, rename classification,
-or final comparison evidence, the digest changes and analysis fails.
+provenance semantics. If staging changes current-path inclusion or final
+comparison evidence, the digest changes and analysis fails.
 
 Any mismatch is `OperationalError("repository changed during analysis")` or an
 equally bounded source-mutation error with exit code 3. Whyline does not retry
@@ -726,17 +738,17 @@ The new inspector may use only these read-only command families:
   material comparison;
 - `git cat-file blob <validated-blob-id>` to read only an already size-bounded
   required `HEAD` blob for fatal UTF-8/binary validation;
-- path-scoped `git diff --raw -z --no-abbrev --find-renames --no-ext-diff
+- path-scoped `git diff --raw -z --no-abbrev --no-renames --no-ext-diff
   --no-textconv HEAD -- <path>` for machine-readable path/change identity; and
 - path-scoped `git diff --patch --unified=0 --no-indent-heuristic
-  --find-renames --no-ext-diff --no-textconv --no-color HEAD -- <path...>` for
+  --no-renames --no-ext-diff --no-textconv --no-color HEAD -- <path>` for
   exact hunk coordinates and content.
 
 Every untrusted path follows `--` as a separate argv value. Object IDs accepted
-back into Git must match the repository's hexadecimal object-ID shape. Connected
-rename aliases may add the exactly reported old path to the final patch command;
-there is no repository-wide diff or search. Copy detection is disabled; only
-`--find-renames` is used.
+back into Git must match the repository's hexadecimal object-ID shape. Both
+diff forms disable rename detection and remain scoped to the one known current
+path. There is no old-path lookup, repository-wide diff, copy detection,
+similarity search, or second path supplied from Codex evidence.
 
 Unified diff is parsed as a bounded structured format because Git has no safer
 machine format for line-level hunk content. Path/change identity comes from the
@@ -906,10 +918,10 @@ Explanation
     45     not established; worktree material is insufficient
 ```
 
-Details may add target kind, full `HEAD`, staging diagnostic, exact current path
-and connected alias, current hunk coordinates, proof counts, candidate signals,
-coverage, and limitations. They do not render current diff lines, agent patch
-lines, or private source identifiers.
+Details may add target kind, full `HEAD`, staging diagnostic, exact current path,
+current hunk coordinates, proof counts, candidate signals, coverage, and
+limitations. They do not render an old/moved-from path, current diff lines,
+agent patch lines, or private source identifiers.
 
 Allowed claim phrases:
 
@@ -1001,11 +1013,13 @@ The milestone is complete only when all of the following pass.
   index or staged/unstaged sub-target is created.
 - [ ] An unchanged queried line in a dirty same-path file remains in the existing
   committed pipeline and has regression-equivalent output/evidence.
-- [ ] One directly observed rename plus modification supplies one old-path alias
-  only for added current-side lines.
-- [ ] Pure rename, copy, ambiguous rename, unmerged state, missing object,
-  binary/invalid required material, and unsupported change shapes produce their
-  frozen non-positive outcomes without fabricated attribution.
+- [ ] A current path absent from `HEAD` is analyzed only as current-side added
+  material and never rendered as proven file creation, rename, move, or copy.
+- [ ] No worktree target contains or discovers an old-path alias; path-scoped
+  Git inspection never expands into repository-wide rename discovery.
+- [ ] Unmerged state, missing object, binary/invalid required material, and
+  unsupported change shapes produce their frozen non-positive outcomes without
+  fabricated attribution.
 - [ ] Added/context/deleted line mapping, file-start zero-context insertion,
   missing-final-newline metadata, adjacent hunks, line-number shifts, and
   multiple hunks follow the frozen current-side locality rules.
@@ -1025,8 +1039,13 @@ The milestone is complete only when all of the following pass.
   path mismatch, hunk-locality mismatch, ambiguous alignment, repeated/generic
   alignment, one distinctive line, and boilerplate-only material cannot be
   strong.
-- [ ] Rename evidence requires exact new path, exact `movedFrom`, and the one
-  directly observed Git rename alias.
+- [ ] A patch change carrying `movedFrom` receives no old-path alias or rename
+  semantics; after that field is discarded, only independently complete
+  ordinary current-path operation, locality, and exact-overlap evidence may
+  qualify or participate in chronology.
+- [ ] A `movedFrom` change whose remaining current-path projection is
+  unsupported, incomplete, or old-path-dependent supplies no signal and adds
+  the frozen material coverage limitation when it could affect the target.
 - [ ] Truncated target hunk/fingerprint material becomes work-bound; truncated
   patch material becomes material limited coverage; neither becomes a complete
   negative.
@@ -1080,8 +1099,8 @@ The milestone is complete only when all of the following pass.
 - [ ] Codex preparation/scanning occurs once per invocation, not once per range
   group; target projection reuses prepared normalized evidence.
 - [ ] File mutation, `HEAD`/branch change, repository-identity change, target
-  path replacement, worktree-evidence change, rename-classification change, or
-  material Codex source mutation prevents a successful stale report.
+  path replacement, worktree-evidence change, or material Codex source mutation
+  prevents a successful stale report.
 - [ ] An index-only change with identical final `HEAD -> worktree` evidence does
   not create new attribution semantics.
 - [ ] Every new Git call is from the frozen read-only families, uses safe argv
@@ -1111,6 +1130,8 @@ without adding:
 - GitHub, PR, review, or first-parent integration context;
 - index-specific provenance or staged/unstaged attribution;
 - repository-wide path, symbol, or correspondence search;
+- worktree rename, move, copy, old-path discovery, or Codex `movedFrom`
+  correspondence; these require a future bounded discovery design;
 - relaxed thresholds, fuzzy/normalized matching, embeddings, LLM decisions, or
   semantic similarity;
 - whole-file attribution for an added/untracked file;

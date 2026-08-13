@@ -890,7 +890,8 @@ test("a deleted prunable linked worktree remains a linked repository match", asy
 
   assert.equal(report.correlation?.status, "matched");
   assert.equal(report.correlation?.selected?.repositoryMatch, "linked-worktree");
-  assert.equal(report.repository.worktrees.some((worktree) => worktree.path === linked && worktree.prunable), true);
+  const canonicalLinked = path.join(await realpath(linkedParent), "linked");
+  assert.equal(report.repository.worktrees.some((worktree) => worktree.path === canonicalLinked && worktree.prunable), true);
 });
 
 test("committed correlation preserves availability states", async (t) => {

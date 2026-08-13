@@ -6,6 +6,8 @@ M2 provides a non-publishing dry run:
 npm run release:dry-run
 ```
 
+The release workflow also runs its prepare/artifact-validation path on pull requests. With no tag and no publish input, the mutation jobs are skipped; tag pushes and explicitly gated dispatches are the only paths that can proceed toward publication or GitHub Release creation.
+
 The release workflow checks out the tag ref, verifies that `package.json` is the version source of truth, runs the normal checks, creates and accepts one npm tarball, and uploads that exact `.tgz`. It records the validated commit and tarball SHA-256; the publication job checks out that commit, rechecks that the tag still resolves to it, verifies the downloaded checksum, and publishes the downloaded file. It does not build or pack again.
 
 The separate compatibility job builds Git `2.36.6` from upstream commit `ecaa3db17183b4a3895ccd0c0c1af01d0e6fed45` (SHA-256 `40308ff4416d2c4be7bb1dfa86094140dd693e22287e4f53347ca7d87952f7c9`), places that executable first on `PATH`, and runs the installed package acceptance. This exercises Whyline's repository discovery, machine-readable status/worktree mapping, blame, commit/diff, tree/blob, and linked-worktree paths rather than only checking the version string.

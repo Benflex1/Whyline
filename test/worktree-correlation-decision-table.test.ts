@@ -180,6 +180,34 @@ test("a complete exact current-worktree patch is strong and matches", () => {
   assert.equal(result.selected?.band, "strong");
 });
 
+test("a complete larger patch hunk can match a bounded exact proof block", () => {
+  const trailingLines = Array.from({ length: 38 }, (_value, index) => `trailing-line-${index}`);
+  const value = input({
+    evidence: {
+      ...input().evidence!,
+      evidence: [evidence({
+        patch: {
+          ...evidence().patch!,
+          changes: [change({
+            worktreeHunks: [{
+              ...change().worktreeHunks![0]!,
+              newLines: 40,
+              orderedLineFingerprints: ["a", "b", ...trailingLines],
+              distinctiveLineFingerprints: ["a", "b", ...trailingLines],
+              lineCount: 40,
+            }],
+          })],
+        },
+      })],
+    },
+  });
+  const candidate = scoreWorktreeCandidate(target(), value);
+  assert.equal(candidate.band, "strong");
+  const result = correlateWorktree(target(), [value], coverage());
+  assert.equal(result.status, "matched");
+  assert.equal(result.selected?.band, "strong");
+});
+
 test("movedFrom is ignored when the current path evidence is otherwise complete", () => {
   const base = evidence();
   const value = input({

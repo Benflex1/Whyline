@@ -84,8 +84,7 @@ function hunkComplete(
     && !change.payloadTruncated
     && hunk !== undefined
     && !hunk.truncated
-    && hunk.lineCount === hunk.orderedLineFingerprints.length
-    && hunk.lineCount <= 32;
+    && hunk.lineCount === hunk.orderedLineFingerprints.length;
 }
 
 function sameRegion(

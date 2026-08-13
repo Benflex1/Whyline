@@ -662,6 +662,20 @@ async function existingCanonicalPath(value: string): Promise<string | null> {
   }
 }
 
+async function canonicalizePathWithExistingParent(value: string): Promise<string> {
+  const target = path.resolve(value);
+  let candidate = target;
+  while (true) {
+    const canonical = await existingCanonicalPath(candidate);
+    if (canonical !== null) {
+      return path.resolve(canonical, path.relative(candidate, target));
+    }
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return target;
+    candidate = parent;
+  }
+}
+
 async function historicalCommonGitDir(
   runner: GitRunner,
   directory: string,
@@ -794,13 +808,14 @@ async function resolveHistoricalDirectory(
     };
   }
 
-  const mapped = deletedMappedWorktree(repository, directory);
+  const deletedDirectory = await canonicalizePathWithExistingParent(directory);
+  const mapped = deletedMappedWorktree(repository, deletedDirectory);
   if (mapped !== null) {
     return {
       repositoryMatch: mapped.repositoryMatch,
       pathMapping: {
         repositoryRoot: mapped.repositoryRoot,
-        historicalCwd: path.resolve(directory),
+        historicalCwd: deletedDirectory,
       },
     };
   }

@@ -94,14 +94,26 @@ function parseWorktreeRecord(tokens: readonly string[]): WorktreeInfo | null {
     : { path: worktreePath, headCommit, branch, detached, bare, locked, prunable };
 }
 
-async function canonicalizeWorktreePath(worktree: WorktreeInfo): Promise<WorktreeInfo> {
-  try {
-    return { ...worktree, path: await realpath(worktree.path) };
-  } catch {
-    // Prunable worktrees may no longer exist; retain their Git-reported path
-    // so deleted-worktree correlation can still use the bounded record.
-    return worktree;
+async function canonicalizePathWithExistingParent(value: string): Promise<string> {
+  const target = path.resolve(value);
+  let candidate = target;
+  while (true) {
+    try {
+      const canonical = await realpath(candidate);
+      return path.resolve(canonical, path.relative(candidate, target));
+    } catch {
+      const parent = path.dirname(candidate);
+      if (parent === candidate) return target;
+      candidate = parent;
+    }
   }
+}
+
+async function canonicalizeWorktreePath(worktree: WorktreeInfo): Promise<WorktreeInfo> {
+  // Prunable worktrees may no longer exist. Canonicalizing the nearest
+  // existing parent still resolves macOS aliases while retaining the missing
+  // suffix needed for bounded deleted-worktree correlation.
+  return { ...worktree, path: await canonicalizePathWithExistingParent(worktree.path) };
 }
 
 export function parseWorktreeList(value: Buffer): WorktreeInfo[] {

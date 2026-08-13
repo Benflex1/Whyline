@@ -104,6 +104,20 @@ function renderAncestryDetails(ancestry: GitAncestryResult | undefined): string[
       lines.push(`  earlier attribution: ${sanitizeTerminalText(ancestry.ancestorSubject)}`);
       lines.push(`  proof: lines=${ancestry.proof.matchedLineCount}, distinctive=${ancestry.proof.distinctiveLineCount}, alphanumeric=${ancestry.proof.alphanumericCount}, current=${ancestry.proof.currentStartLine}, ancestor=${ancestry.proof.ancestorStartLine}`);
       break;
+    case "transformed":
+      lines.push("  relationship: direct-parent-declaration");
+      lines.push(`  textual commit: ${sanitizeTerminalText(ancestry.textualCommitId)}`);
+      lines.push(`  parent commit: ${sanitizeTerminalText(ancestry.parentCommitId)}`);
+      lines.push(`  child path: ${sanitizeTerminalText(ancestry.childPath)}`);
+      lines.push(`  parent path: ${sanitizeTerminalText(ancestry.parentPath)}`);
+      lines.push(`  child declaration: ${ancestry.childDeclaration.kind} ${sanitizeTerminalText(ancestry.childDeclaration.qualifiedName)} lines ${ancestry.childDeclaration.span.startLine}-${ancestry.childDeclaration.span.endLine}`);
+      lines.push(`  parent declaration: ${ancestry.parentDeclaration.kind} ${sanitizeTerminalText(ancestry.parentDeclaration.qualifiedName)} lines ${ancestry.parentDeclaration.span.startLine}-${ancestry.parentDeclaration.span.endLine}`);
+      lines.push(`  syntactic key: kind=${ancestry.childDeclaration.kind}, qualified-name=${sanitizeTerminalText(ancestry.childDeclaration.qualifiedName)}, form=${ancestry.childDeclaration.declarationForm}, staticness=${ancestry.childDeclaration.staticStatus === null ? "not-applicable" : ancestry.childDeclaration.staticStatus}`);
+      lines.push(`  selected parent evidence: ${ancestry.parentSelectionEvidence}`);
+      lines.push(`  hunk: connection=${ancestry.hunk.connection}, old=${ancestry.hunk.oldStart},${ancestry.hunk.oldLines}, new=${ancestry.hunk.newStart},${ancestry.hunk.newLines}`);
+      lines.push(`  anchor: lines=${ancestry.anchor.matchedLineCount}, distinctive=${ancestry.anchor.distinctiveLineCount}, alphanumeric=${ancestry.anchor.alphanumericCount}`);
+      lines.push("  limitation: the queried line itself is not an exact ancestor match");
+      break;
     case "uncertain":
       lines.push(`  reason: ${ancestry.reason}`);
       if (ancestry.candidate !== undefined) {

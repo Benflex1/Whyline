@@ -1,8 +1,11 @@
 import type {
+  DeclarationHunkProof,
   ExactBlockProof,
   ExactTransitionKind,
   GitLineAncestor,
+  PreservedAnchorProof,
 } from "../ancestry/model.js";
+import type { DeclarationDescriptor } from "../symbol/model.js";
 import type { CorrelationResult } from "../correlation/model.js";
 import type {
   GitBlameAttribution,
@@ -48,6 +51,7 @@ export interface RangeTextualGroup {
 
 export type RangeAncestrySegmentStatus =
   | "exact"
+  | "transformed"
   | "uncertain"
   | "none"
   | "unavailable"
@@ -62,6 +66,17 @@ export interface RangeAncestrySegment {
   readonly ancestorSubject?: string;
   readonly transition?: ExactTransitionKind;
   readonly proof?: ExactBlockProof;
+  readonly transformed?: {
+    readonly textualCommitId: string;
+    readonly parentCommitId: string;
+    readonly childPath: string;
+    readonly parentPath: string;
+    readonly childDeclaration: DeclarationDescriptor;
+    readonly parentDeclaration: DeclarationDescriptor;
+    readonly parentSelectionEvidence: "blame-previous" | "sole-parent";
+    readonly hunk: DeclarationHunkProof;
+    readonly anchor: PreservedAnchorProof;
+  };
   readonly limitations: readonly string[];
 }
 

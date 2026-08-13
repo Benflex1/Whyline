@@ -48,6 +48,32 @@ function renderAncestrySegment(segment: RangeAncestrySegment): string[] {
       + ", current=" + segment.proof.currentStartLine
       + ", ancestor=" + segment.proof.ancestorStartLine);
   }
+  if (segment.status === "transformed" && segment.transformed !== undefined) {
+    const evidence = segment.transformed;
+    lines.push("      relationship: direct-parent-declaration");
+    lines.push("      textual commit: " + sanitizeTerminalText(evidence.textualCommitId));
+    lines.push("      parent commit: " + sanitizeTerminalText(evidence.parentCommitId));
+    lines.push("      child path: " + sanitizeTerminalText(evidence.childPath));
+    lines.push("      parent path: " + sanitizeTerminalText(evidence.parentPath));
+    lines.push("      child declaration: " + evidence.childDeclaration.kind + " "
+      + sanitizeTerminalText(evidence.childDeclaration.qualifiedName) + " lines "
+      + evidence.childDeclaration.span.startLine + "-" + evidence.childDeclaration.span.endLine);
+    lines.push("      parent declaration: " + evidence.parentDeclaration.kind + " "
+      + sanitizeTerminalText(evidence.parentDeclaration.qualifiedName) + " lines "
+      + evidence.parentDeclaration.span.startLine + "-" + evidence.parentDeclaration.span.endLine);
+    lines.push("      syntactic key: kind=" + evidence.childDeclaration.kind
+      + ", qualified-name=" + sanitizeTerminalText(evidence.childDeclaration.qualifiedName)
+      + ", form=" + evidence.childDeclaration.declarationForm
+      + ", staticness=" + (evidence.childDeclaration.staticStatus === null ? "not-applicable" : evidence.childDeclaration.staticStatus));
+    lines.push("      selected parent evidence: " + evidence.parentSelectionEvidence);
+    lines.push("      hunk: connection=" + evidence.hunk.connection
+      + ", old=" + evidence.hunk.oldStart + "," + evidence.hunk.oldLines
+      + ", new=" + evidence.hunk.newStart + "," + evidence.hunk.newLines);
+    lines.push("      anchor: lines=" + evidence.anchor.matchedLineCount
+      + ", distinctive=" + evidence.anchor.distinctiveLineCount
+      + ", alphanumeric=" + evidence.anchor.alphanumericCount);
+    lines.push("      limitation: the queried line itself is not an exact ancestor match");
+  }
   for (const limitation of segment.limitations) {
     lines.push("      limitation: " + sanitizeTerminalText(limitation));
   }
@@ -119,7 +145,7 @@ export function renderRangeDetailsWithHeader(
     lines.push(omission(report.textualGroups.length - MAX_RENDERED_GROUPS));
   }
 
-  lines.push("", "Exact ancestry");
+  lines.push("", "Git ancestry");
   const visibleAncestry = report.textualGroups.slice(0, MAX_RENDERED_GROUPS);
   for (const group of visibleAncestry) {
     lines.push("  Group " + sanitizeTerminalText(group.id) + "  lines: " + spanText(group));

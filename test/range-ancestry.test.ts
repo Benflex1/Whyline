@@ -182,3 +182,101 @@ test("covers longer exact regions with multiple unchanged proof windows", async 
   assert.equal(exactSegments.length >= 2, true, JSON.stringify(coverage));
   assert.equal(exactSegments.every((segment) => (segment.proof?.matchedLineCount ?? 0) <= 32), true, JSON.stringify(coverage));
 });
+
+test("reports transformed coverage only for the qualifying changed line", async (t) => {
+  const fixture = await makeFixture(t);
+  const targetPath = "src/parser.ts";
+  const before = Array.from({ length: 10 }, (_value, index) => "const before" + index + " = true;");
+  const after = Array.from({ length: 10 }, (_value, index) => "const after" + index + " = true;");
+  const declaration = [
+    "function parseToken(input: string): string {",
+    "  const anchorOne = \"range direct parent declaration alpha parser marker\";",
+    "  const anchorTwo = \"range direct parent declaration beta parser marker\";",
+    "  return input.trim();",
+    "}",
+  ];
+  await writeLines(fixture, targetPath, [...before, ...declaration, ...after]);
+  await git(fixture, ["add", "--", targetPath]);
+  await git(fixture, ["commit", "--no-verify", "-m", "add range parser"]);
+  await writeLines(fixture, targetPath, [
+    ...before,
+    declaration[0] as string,
+    declaration[1] as string,
+    declaration[2] as string,
+    "  const editedLine = input.toUpperCase();",
+    declaration[3] as string,
+    declaration[4] as string,
+    ...after,
+  ]);
+  await git(fixture, ["add", "--", targetPath]);
+  await git(fixture, ["commit", "--no-verify", "-m", "move and edit range parser"]);
+
+  const analyzed = await inspectRange(fixture, targetPath + ":11-16");
+  const group = analyzed.groups.find((value) => value.lines.some((line) => line.queryLine === 14));
+  assert.ok(group);
+  if (group === undefined) return;
+  const coverage = await traceRangeGroupAncestry(
+    fixture.runner,
+    analyzed.repository,
+    analyzed.location,
+    group,
+  );
+  const transformed = coverage.segments.find((segment) => segment.span.startLine === 14);
+  assert.equal(transformed?.status, "transformed", JSON.stringify({ group, coverage }));
+  assert.equal(transformed?.transformed?.childDeclaration.qualifiedName, "parseToken", JSON.stringify(coverage));
+  assert.equal(coverage.segments.some((segment) => segment.status === "exact"), false, JSON.stringify(coverage));
+});
+
+test("bounds unique transformed declaration attempts at twelve per range invocation", async (t) => {
+  const fixture = await makeFixture(t);
+  const targetPath = "src/many.ts";
+  const parentLines: string[] = [];
+  const childLines: string[] = [];
+  for (let index = 0; index < 13; index += 1) {
+    parentLines.push(
+      "function parseToken" + index + "(input: string): string {",
+      "  const anchorOne" + index + " = \"many declaration correspondence alpha marker " + index + "\";",
+      "  const anchorTwo" + index + " = \"many declaration correspondence beta marker " + index + "\";",
+      "  return input.trim();",
+      "}",
+    );
+    childLines.push(
+      "function parseToken" + index + "(input: string): string {",
+      "  const anchorOne" + index + " = \"many declaration correspondence alpha marker " + index + "\";",
+      "  const anchorTwo" + index + " = \"many declaration correspondence beta marker " + index + "\";",
+      "  const editedLine" + index + " = input.toUpperCase();",
+      "  return input.trim() + editedLine" + index + ";",
+      "}",
+    );
+  }
+  await writeLines(fixture, targetPath, parentLines);
+  await git(fixture, ["add", "--", targetPath]);
+  await git(fixture, ["commit", "--no-verify", "-m", "add many declarations"]);
+  await writeLines(fixture, targetPath, childLines);
+  await git(fixture, ["add", "--", targetPath]);
+  await git(fixture, ["commit", "--no-verify", "-m", "edit many declarations"]);
+
+  const analyzed = await inspectRange(fixture, targetPath + ":1-" + childLines.length);
+  const group = analyzed.groups.find((value) => value.commit?.subject === "edit many declarations");
+  assert.ok(group);
+  if (group === undefined) return;
+  const coverage = await traceRangeGroupAncestry(
+    fixture.runner,
+    analyzed.repository,
+    analyzed.location,
+    group,
+  );
+  const transformedSegments = coverage.segments
+    .filter((segment) => segment.status === "transformed")
+  const transformedCount = transformedSegments
+    .reduce((total, segment) => total + segment.span.endLine - segment.span.startLine + 1, 0);
+  const transformedDeclarations = new Set(
+    transformedSegments.map((segment) => segment.transformed?.childDeclaration.qualifiedName),
+  );
+  const workBoundCount = coverage.segments
+    .filter((segment) => segment.status === "unavailable" && segment.limitations.some((value) => value.includes("12-attempt")))
+    .reduce((total, segment) => total + segment.span.endLine - segment.span.startLine + 1, 0);
+  assert.equal(transformedCount, 24, JSON.stringify(coverage));
+  assert.equal(transformedDeclarations.size, 12, JSON.stringify(coverage));
+  assert.equal(workBoundCount, 2, JSON.stringify(coverage));
+});

@@ -40,6 +40,8 @@ function renderAncestrySegment(segment: RangeAncestrySegment): string {
         + ":" + (segment.ancestor?.line ?? "?")
         + " " + shortCommit(segment.ancestor?.commitId ?? "")
         + " \"" + sanitizeTerminalText(segment.ancestorSubject ?? "") + "\"";
+    case "transformed":
+      return "    " + span + "  verified direct-parent declaration correspondence; queried line is not an exact ancestor match";
     case "uncertain":
       return "    " + span + "  uncertain; exact ancestry not established";
     case "none":
@@ -81,7 +83,7 @@ export function renderRangeSummaryWithHeader(
     lines.push(omission(report.textualGroups.length - MAX_RENDERED_GROUPS));
   }
 
-  lines.push("", "  Exact ancestry");
+  lines.push("", "  Git ancestry");
   for (const group of visibleTextual) {
     const coverage = report.ancestry.get(group.id);
     if (coverage === undefined) {

@@ -469,13 +469,20 @@ function isAllowedReadOnlyGit(
       && isSafeRepositoryPath(normalized[5]!);
   }
   if (command === "ls-tree") {
-    return normalized.length === 7
+    const historicalBlob = normalized.length === 6
+      && normalized[1] === "-z"
+      && normalized[2] === "--full-tree"
+      && isHexCommit(normalized[3]!)
+      && normalized[4] === "--"
+      && isSafeRepositoryPath(normalized[5]!);
+    const headNames = normalized.length === 7
       && normalized[1] === "-r"
       && normalized[2] === "-z"
       && normalized[3] === "--name-only"
       && normalized[4] === "HEAD"
       && normalized[5] === "--"
       && isSafeRepositoryPath(normalized[6]!);
+    return historicalBlob || headNames;
   }
   if (command === "ls-files") {
     return normalized.length === 4
@@ -484,9 +491,13 @@ function isAllowedReadOnlyGit(
       && isSafeRepositoryPath(normalized[3]!);
   }
   if (command === "cat-file") {
-    return normalized.length === 3
+    const commitExistence = normalized.length === 3
       && normalized[1] === "-e"
       && /^[0-9a-fA-F]{7,128}\^\{commit\}$/.test(normalized[2]!);
+    const blobRead = normalized.length === 3
+      && normalized[1] === "blob"
+      && isHexCommit(normalized[2]!);
+    return commitExistence || blobRead;
   }
   if (command === "hash-object") {
     return exact(["hash-object", "-t", "tree", "--stdin"])

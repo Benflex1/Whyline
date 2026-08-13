@@ -135,6 +135,7 @@ test("disposable real CLI resolves a decorated overloaded TSX method conservativ
   assert.match(concise.stdout, /method, lines 2-14/);
   assert.match(concise.stdout, /add overloaded parser|edit parser interior|move parser block/);
   assert.match(concise.stdout, /exact predecessor/);
+  assert.match(concise.stdout, /verified direct-parent declaration correspondence/);
   assert.match(concise.stdout, /uncommitted|not run/);
   assert.doesNotMatch(concise.stdout, /symbol origin|historical symbol identity|same-named historical declaration/i);
 

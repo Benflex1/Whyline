@@ -1,5 +1,7 @@
 # Real-repository provenance-pipeline validation
 
+> **Historical record:** This validation report is superseded by later correlation hardening and subsequent release-readiness work. Its findings are preserved as historical evidence and are not the current v0.1.0 release acceptance record.
+
 **Date:** 2026-08-09
 **Scope:** read-only validation of Git textual attribution → local Codex
 history discovery → conservative correlation → sanitized explanation.

@@ -52,7 +52,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 - No generic session browser or full prompt/transcript dump.
 - No persistent index or SQLite database.
 - No semantic ancestry claim. v0 reports **last textual attribution**, even if that attribution is a refactor.
-- No attempt to attribute an uncommitted target line to an agent. It reports the dirty state and stops correlation because there is no responsible commit yet.
+- No fabricated commit or Git ancestry for an uncommitted target line. It reports the dirty state and may add bounded worktree-change Codex correlation when exact current-change evidence is sufficient; that correlation is not an authorship or causation claim.
 - No promise to recover sessions whose history is disabled, deleted, rotated, truncated, inaccessible, or in an unsupported transcript version.
 - No automatic claim that the nearest session in time caused a change.
 - No supported Windows release in the first milestone. Keep path parsing portable, but ship v0 for Linux and macOS; Windows requires separate drive, UNC, junction, and Git path-encoding fixtures.
@@ -60,7 +60,7 @@ The v0 pipeline should run on demand and keep no persistent index. The most impo
 ### Explicit v0 behavior for awkward inputs
 
 - **Dirty file, unchanged queried line:** use worktree-aware blame; if Git still attributes the line to a commit, report that attribution and prominently report the dirty file state.
-- **Dirty or untracked queried line:** report `Uncommitted`; do not invent a commit or session correlation.
+- **Dirty or untracked queried line:** report `Uncommitted` without inventing a commit or Git ancestry; when exact current-change evidence is sufficient, add bounded worktree-change Codex correlation without claiming authorship or causation.
 - **Deleted path:** reject it in v0 because the command addresses the current worktree.
 - **Binary file or line beyond EOF:** return a location error.
 - **No matching Codex session:** return the complete Git report and `Codex evidence: no reliable match found`.
@@ -84,7 +84,7 @@ An index improves repeated queries over very large histories, but v0 does not ye
 
 ## Proposed architecture
 
-Use strict TypeScript on Node.js 24 LTS, with ESM, npm, `tsc`, and the built-in `node:test` runner. TypeScript 5.9.x is a runtime dependency because symbol queries load its public compiler API lazily; `@types/node` remains a development dependency. Node's standard library covers subprocesses, paths, streaming JSONL, hashing, and filesystem access. Use a tiny hand-written CLI parser for the supported commands. Do not use a Git library: invoke the installed `git` executable with argument arrays and machine-readable formats, never through a shell. Require Git 2.31 or newer, then verify every selected option against that floor in CI.
+Use strict TypeScript on Node.js 24 LTS, with ESM, npm, `tsc`, and the built-in `node:test` runner. TypeScript 5.9.x is a runtime dependency because symbol queries load its public compiler API lazily; `@types/node` remains a development dependency. Node's standard library covers subprocesses, paths, streaming JSONL, hashing, and filesystem access. Use a tiny hand-written CLI parser for the supported commands. Do not use a Git library: invoke the installed `git` executable with argument arrays and machine-readable formats, never through a shell. Require Git 2.36 or newer, then verify every selected option against that floor in CI.
 
 Suggested source structure:
 
@@ -201,9 +201,9 @@ there is no general configuration surface or persistent history state.
 1. Parse `<file>:<line>` from the right so paths containing colons can be handled where possible.
 2. Discover the containing worktree and build a repository identity.
 3. Validate the current text line and inspect target-path dirty state.
-4. Run one-line blame against the worktree. If the line is uncommitted, build a Git/working-tree-only result.
-5. Load the blamed commit and choose the parent relevant to the blamed line; then compute changed paths and the relevant hunk against that parent.
-6. Ask each configured `AgentHistorySource` (Codex only in v0) for summaries that may belong to this repository.
+4. Run one-line blame against the worktree. If the line is uncommitted, build a result with no fabricated commit or Git ancestry and inspect the current worktree change.
+5. For a committed line, load the blamed commit and choose the parent relevant to the blamed line; then compute changed paths and the relevant hunk against that parent.
+6. Ask each configured `AgentHistorySource` (Codex only in v0) for summaries that may belong to this repository, then project evidence onto committed targets and ready worktree changes.
 7. Exclude known repository mismatches. Rank summaries cheaply, then extract full evidence only for eligible candidates.
 8. Calculate independent correlation signals and contradictions. Apply confidence gates and ambiguity rules.
 9. Assemble a report model with explicit claim provenance and render it.
@@ -216,8 +216,8 @@ Range analysis is a dedicated aggregation path:
 2. Run one `git blame --line-porcelain -L START,END -- PATH` and retain one fact per queried line.
 3. Load unique commit metadata once, select parents from each line's blame evidence, and inspect each reusable commit/parent/path group once.
 4. Trace movement-aware ancestry at span granularity. Exact status is attached only to queried lines covered by independently valid exact proof blocks; uncovered lines remain separately typed.
-5. Prepare Codex history once, then project the unchanged correlation semantics independently onto committed textual groups.
-6. Deep-analyze only the first 24 committed textual groups in source order. Later groups are `unavailable / work-bound`; uncommitted groups receive no ancestry or Codex attribution.
+5. Prepare Codex history once, then project the unchanged correlation semantics independently onto committed textual groups and ready worktree groups.
+6. Deep-analyze only the first 24 committed textual groups and ready worktree groups in source order. Later groups are `unavailable / work-bound`; uncommitted groups receive no Git ancestry or fabricated commit, and only ready groups receive bounded worktree Codex correlation.
 7. Verify repository HEAD, branch, target snapshot, and dirty state before rendering the successful result.
 
 Grouping is deterministic compression, never authority. Textual groups retain their separate source spans and split on committed/uncommitted state, commit, blamed path, or selected parent differences.
@@ -902,7 +902,7 @@ Each slice should be reviewable and independently testable.
 
 ### Slice 6: Release hardening
 
-- Verify the Node 24 and Git 2.31 version floors against the packaged CLI and every command option used.
+- Verify the Node 24 and Git 2.36 version floors against the packaged CLI and every command option used.
 - Test Linux and macOS path/process behavior. Audit Windows drive/UNC parsing without claiming Windows support.
 - Document privacy behavior, known Codex variants, Git limitations, and unsupported inputs.
 - Package the CLI and verify installation in a clean environment.
@@ -913,7 +913,7 @@ Each slice should be reviewable and independently testable.
 1. **Codex transcript instability remains the primary risk.** The completed preflight establishes a narrow 0.142.5–0.147.0 envelope family, but the adapter must remain version-labelled, diagnostic-heavy, and conservative outside the observed variants.
 2. **Surface support must be named.** “Codex history” may mean CLI, IDE, desktop app, exec, or imported sessions. v0 should claim only surfaces observed during preflight.
 3. **Latency budget is unset.** Choose a target after measuring real history; suggested starting acceptance is under 500 ms for Git-only and under 2 seconds for a warm filesystem with a typical Codex history. These are proposals, not requirements until measured.
-4. **The proposed Git 2.31 floor needs CI proof.** Verify `--path-format`, porcelain-v2, `worktree -z`, and object-format behavior on exactly that version; raise the floor if the required machine-readable behavior differs.
+4. **The Git 2.36 floor needs CI proof.** Verify `--path-format`, porcelain-v2, `worktree -z`, and object-format behavior on exactly that version; raise the floor if the required machine-readable behavior differs.
 5. **Windows is deliberately deferred.** Parsing from the final colon helps with drive letters, but UNC paths, junctions, and Git path encoding require dedicated fixtures before a support claim.
 6. **Merge parent selection needs fixture proof.** Blame porcelain's `previous` metadata may not cover every merge-resolution case. v0 should report ambiguity rather than silently choose first parent.
 7. **Patch fingerprint thresholds need calibration.** The proposed weights and “two distinctive lines” floor are safe starting points but must be evaluated against redacted real sessions and adversarial fixtures.

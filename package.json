@@ -1,7 +1,29 @@
 {
   "name": "whyline",
   "version": "0.1.0",
-  "private": true,
+  "description": "Answer \"Why does this line exist?\" with conservative Git and local Codex evidence.",
+  "license": "MIT",
+  "author": "Benflex1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Benflex1/Whyline.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Benflex1/Whyline/issues"
+  },
+  "homepage": "https://github.com/Benflex1/Whyline#readme",
+  "keywords": [
+    "git",
+    "provenance",
+    "codex",
+    "cli",
+    "developer-tools"
+  ],
+  "files": [
+    "dist/src/**/*.js",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "bin": {
     "whyline": "dist/src/cli/main.js"
@@ -13,7 +35,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "typescript": "^5.9.2"

@@ -7,12 +7,14 @@ export interface CliArguments {
 }
 
 export type CliQuery =
+  | { readonly kind: "help" }
+  | { readonly kind: "version" }
   | { readonly kind: "location"; readonly location: string }
   | { readonly kind: "symbol"; readonly selector: string; readonly file: string };
 
 function usageError(): InvalidInputError {
   return new InvalidInputError(
-    "usage: whyline [--details] <file>:<line|start-end> | whyline [--details] --symbol <selector> <file>",
+    "usage: whyline --help | whyline --version | whyline [--details] <file>:<line|start-end> | whyline [--details] --symbol <selector> <file>",
   );
 }
 
@@ -54,6 +56,14 @@ function parseSymbolFile(value: string | undefined): string {
 }
 
 export function parseArguments(argv: readonly string[]): CliArguments {
+  if (argv.length === 1 && argv[0] === "--help") {
+    return { details: false, query: { kind: "help" } };
+  }
+
+  if (argv.length === 1 && argv[0] === "--version") {
+    return { details: false, query: { kind: "version" } };
+  }
+
   if (argv.length === 1) {
     return { details: false, query: { kind: "location", location: parseLocationArgument(argv[0]) } };
   }

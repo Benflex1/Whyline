@@ -11,6 +11,17 @@ test("parses the default location form", () => {
   });
 });
 
+test("parses help and version commands without a repository query", () => {
+  assert.deepEqual(parseArguments(["--help"]), {
+    details: false,
+    query: { kind: "help" },
+  });
+  assert.deepEqual(parseArguments(["--version"]), {
+    details: false,
+    query: { kind: "version" },
+  });
+});
+
 test("parses details before the location", () => {
   assert.deepEqual(parseArguments(["--details", "src/parser.ts:42"]), {
     details: true,

@@ -1,4 +1,7 @@
-import type { CorrelationResult } from "../correlation/model.js";
+import type {
+  CorrelationResult,
+  WorktreeTargetConstruction,
+} from "../correlation/model.js";
 import type { GitAncestryResult } from "../ancestry/model.js";
 
 export type ClaimBasis = "fact" | "derived" | "inferred";
@@ -183,4 +186,39 @@ export interface WhylineReport {
   readonly provenance: GitProvenance;
   readonly ancestry?: GitAncestryResult;
   readonly correlation?: CorrelationResult;
+  readonly worktreeCorrelation?: WorktreeCorrelationReport;
+}
+
+export interface WorktreeCorrelationProofReport {
+  readonly targetStartLine: number;
+  readonly patchStartLine: number;
+  readonly matchedLineCount: number;
+  readonly distinctiveLineCount: number;
+  readonly alphanumericCount: number;
+  readonly coveredQuerySpans: readonly { readonly startLine: number; readonly endLine: number }[];
+}
+
+export interface WorktreeCorrelationHunkReport {
+  readonly operation: "update" | "add";
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly queriedSpans: readonly { readonly startLine: number; readonly endLine: number }[];
+  readonly proof?: WorktreeCorrelationProofReport;
+  readonly complete: true;
+}
+
+export interface WorktreeCorrelationReport {
+  readonly targetKind: "worktree";
+  readonly baseCommitId: string;
+  readonly targetPath: string;
+  readonly changeKind: "modified" | "added";
+  readonly staging: "staged" | "unstaged" | "partially-staged" | "untracked" | "unknown";
+  readonly coveredSpans: readonly { readonly startLine: number; readonly endLine: number }[];
+  readonly hunks: readonly WorktreeCorrelationHunkReport[];
+  readonly status: CorrelationResult["status"] | "insufficient" | "work-bound";
+  readonly result?: CorrelationResult;
+  readonly construction?: WorktreeTargetConstruction["status"];
+  readonly limitations: readonly string[];
 }

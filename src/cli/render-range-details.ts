@@ -170,6 +170,9 @@ export function renderRangeDetailsWithHeader(
     if (correlation === undefined) {
       lines.push(...renderCorrelationGroup({
         groupId: textualGroup.id,
+        analysisGroupId: textualGroup.id,
+        textualGroupId: textualGroup.id,
+        targetKind: "commit",
         spans: textualGroup.spans,
         status: "not-run",
         limitations: ["Uncommitted lines do not receive Codex attribution."],

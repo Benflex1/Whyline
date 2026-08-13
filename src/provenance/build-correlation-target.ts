@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import type {
   CorrelationHunk,
-  CorrelationTarget,
+  CommitCorrelationTarget,
 } from "../correlation/model.js";
 import type {
   GitDiffLine,
@@ -93,7 +93,7 @@ export function buildCorrelationTarget(
   repository: RepositoryContext,
   location: ResolvedCodeLocation,
   provenance: GitProvenance,
-): CorrelationTarget | null {
+): CommitCorrelationTarget | null {
   if (
     provenance.state !== "committed"
     || provenance.commit === null
@@ -102,8 +102,10 @@ export function buildCorrelationTarget(
   }
 
   return {
+    kind: "commit",
     repository: {
       worktreeRoot: repository.worktreeRoot,
+      gitDir: repository.gitDir,
       commonGitDir: repository.commonGitDir,
       objectFormat: repository.objectFormat,
       worktrees: repository.worktrees.map((worktree) => ({

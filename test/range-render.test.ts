@@ -219,8 +219,8 @@ test("renders mixed range evidence without collapsing domains", () => {
       }],
     ]),
     [
-      { groupId: first.id, spans: first.spans, status: "matched", result: correlation("matched", candidate("0f83abcd")) , limitations: [] },
-      { groupId: second.id, spans: second.spans, status: "none", result: correlation("none"), limitations: [] },
+      { groupId: first.id, analysisGroupId: first.id, textualGroupId: first.id, targetKind: "commit", spans: first.spans, status: "matched", result: correlation("matched", candidate("0f83abcd")) , limitations: [] },
+      { groupId: second.id, analysisGroupId: second.id, textualGroupId: second.id, targetKind: "commit", spans: second.spans, status: "none", result: correlation("none"), limitations: [] },
     ],
   ));
 
@@ -304,7 +304,7 @@ test("details include forensic group evidence but not private transcript materia
   const output = renderRangeDetails(report(
     [first],
     new Map([[first.id, exactCoverage]]),
-    [{ groupId: first.id, spans: first.spans, status: "matched", result: correlation("matched", candidate("session-a")), limitations: [] }],
+    [{ groupId: first.id, analysisGroupId: first.id, textualGroupId: first.id, targetKind: "commit", spans: first.spans, status: "matched", result: correlation("matched", candidate("session-a")), limitations: [] }],
   ));
   assert.match(output, /Textual groups/);
   assert.match(output, /selected parent|parent/i);
@@ -328,6 +328,9 @@ test("reports exact group omissions for summary and details bounds", () => {
   ]));
   const correlations = groups.map((value) => ({
     groupId: value.id,
+    analysisGroupId: value.id,
+    textualGroupId: value.id,
+    targetKind: "commit" as const,
     spans: value.spans,
     status: "none" as const,
     result: correlation("none"),

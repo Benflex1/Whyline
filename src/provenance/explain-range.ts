@@ -266,12 +266,18 @@ export async function analyzeResolvedRange(
     const correlationPromise = prepared === undefined || groupTarget === null
       ? Promise.resolve<RangeCorrelationGroup>({
         groupId: group.id,
+        analysisGroupId: group.id,
+        textualGroupId: group.id,
+        targetKind: "commit",
         spans: group.spans,
         status: "not-run",
         limitations: ["Codex projection was not available for this committed group."],
       })
       : projectPreparedCodex(prepared, groupTarget, groupLocation).then((result) => ({
         groupId: group.id,
+        analysisGroupId: group.id,
+        textualGroupId: group.id,
+        targetKind: "commit" as const,
         spans: group.spans,
         status: result.status,
         result,
@@ -292,6 +298,9 @@ export async function analyzeResolvedRange(
     ancestry.set(group.id, notRunCoverage(group, "work-bound", message));
     correlations.push({
       groupId: group.id,
+      analysisGroupId: group.id,
+      textualGroupId: group.id,
+      targetKind: "commit",
       spans: group.spans,
       status: "work-bound",
       limitations: [message],

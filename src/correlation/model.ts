@@ -4,6 +4,8 @@ import type {
   AgentPatchChange,
   AgentSessionSummary,
 } from "../agents/agent-history-source.js";
+import type { RangeLineSpan } from "../provenance/range-model.js";
+import type { FileSnapshot } from "../provenance/model.js";
 
 export type CorrelationSignalKind =
   | "session-head-target-reference"
@@ -41,16 +43,20 @@ export interface CorrelationHunk {
   readonly truncated: boolean;
 }
 
-export interface CorrelationTarget {
-  readonly repository: {
-    readonly worktreeRoot: string;
+export interface CorrelationRepositoryIdentity {
+  readonly worktreeRoot: string;
+  readonly gitDir: string;
+  readonly commonGitDir: string;
+  readonly objectFormat: string;
+  readonly worktrees: readonly {
+    readonly path: string;
     readonly commonGitDir: string;
-    readonly objectFormat: string;
-    readonly worktrees: readonly {
-      readonly path: string;
-      readonly commonGitDir: string;
-    }[];
-  };
+  }[];
+}
+
+export interface CommitCorrelationTarget {
+  readonly kind: "commit";
+  readonly repository: CorrelationRepositoryIdentity;
   readonly targetPath: string;
   readonly blamedPath: string | null;
   readonly commit: {
@@ -65,6 +71,67 @@ export interface CorrelationTarget {
   }[];
   readonly relevantHunks: readonly CorrelationHunk[];
 }
+
+/** Compatibility alias for the pre-union committed correlation target. */
+export type CorrelationTarget = CommitCorrelationTarget;
+
+export interface WorktreeCorrelationHunk extends CorrelationHunk {
+  readonly basis: "derived";
+  readonly operation: "update" | "add";
+  readonly queriedSpans: readonly RangeLineSpan[];
+  readonly currentLineFingerprints: readonly string[];
+  readonly currentDistinctiveLineFingerprints: readonly string[];
+  readonly currentLineAlphanumericCounts: readonly number[];
+  readonly complete: true;
+}
+
+export interface WorktreeTargetSnapshot {
+  readonly baseCommitId: string;
+  readonly repositoryPath: string;
+  readonly changeKind: WorktreeCorrelationTarget["changeKind"];
+  readonly fileSnapshot: FileSnapshot;
+  readonly evidenceDigest: string;
+}
+
+export interface WorktreeCorrelationTarget {
+  readonly kind: "worktree";
+  readonly basis: "derived";
+  readonly repository: CorrelationRepositoryIdentity;
+  readonly baseCommitId: string;
+  readonly targetPath: string;
+  readonly changeKind: "modified" | "added";
+  readonly staging: "staged" | "unstaged" | "partially-staged" | "untracked" | "unknown";
+  readonly queriedSpans: readonly RangeLineSpan[];
+  readonly relevantHunks: readonly [WorktreeCorrelationHunk];
+  readonly targetSnapshot: WorktreeTargetSnapshot;
+}
+
+export type ProvenanceCorrelationTarget = CommitCorrelationTarget | WorktreeCorrelationTarget;
+
+export type WorktreeTargetConstruction =
+  | {
+      readonly status: "ready";
+      readonly queriedSpans: readonly RangeLineSpan[];
+      readonly target: WorktreeCorrelationTarget;
+    }
+  | {
+      readonly status: "insufficient";
+      readonly queriedSpans: readonly RangeLineSpan[];
+      readonly reason: "query-not-current-side-change" | "insufficient-distinctive-material";
+      readonly limitations: readonly string[];
+    }
+  | {
+      readonly status: "unavailable";
+      readonly queriedSpans: readonly RangeLineSpan[];
+      readonly reason: "unmerged" | "unsupported-change-shape" | "missing-head-object" | "incomplete-diff";
+      readonly limitations: readonly string[];
+    }
+  | {
+      readonly status: "work-bound";
+      readonly queriedSpans: readonly RangeLineSpan[];
+      readonly reason: "file-too-large" | "hunk-too-large" | "group-limit";
+      readonly limitations: readonly string[];
+    };
 
 export interface CorrelationSignal {
   readonly kind: CorrelationSignalKind;

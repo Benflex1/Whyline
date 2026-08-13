@@ -65,8 +65,10 @@ function hunk(overrides: Partial<CorrelationHunk> = {}): CorrelationHunk {
 
 function target(overrides: Partial<CorrelationTarget> = {}): CorrelationTarget {
   return {
+    kind: "commit",
     repository: {
       worktreeRoot: "/workspace/project",
+      gitDir: "/workspace/project/.git",
       commonGitDir: "/workspace/project/.git",
       objectFormat: "sha1",
       worktrees: [{ path: "/workspace/project", commonGitDir: "/workspace/project/.git" }],

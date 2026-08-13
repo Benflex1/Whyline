@@ -90,11 +90,15 @@ export type RangeCorrelationStatus =
   | "ambiguous"
   | "none"
   | "unavailable"
+  | "insufficient"
   | "not-run"
   | "work-bound";
 
 export interface RangeCorrelationGroup {
   readonly groupId: string;
+  readonly analysisGroupId: string;
+  readonly textualGroupId: string;
+  readonly targetKind: "commit" | "worktree";
   readonly spans: readonly RangeLineSpan[];
   readonly status: RangeCorrelationStatus;
   readonly result?: CorrelationResult;

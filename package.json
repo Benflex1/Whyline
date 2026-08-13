@@ -36,7 +36,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
     "check": "npm run typecheck && npm test",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "package:acceptance": "node scripts/package-acceptance.mjs",
+    "release:check": "npm run build && node scripts/release-preflight.mjs",
+    "release:dry-run": "npm run check && git diff --check && npm run package:acceptance"
   },
   "dependencies": {
     "typescript": "^5.9.2"

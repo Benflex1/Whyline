@@ -125,6 +125,18 @@ export interface AgentPatchHunkRange {
   readonly newLines: number;
 }
 
+export interface AgentPatchHunkEvidence {
+  readonly oldStart: number;
+  readonly oldLines: number;
+  readonly newStart: number;
+  readonly newLines: number;
+  readonly matchSide: "added" | "content";
+  readonly orderedLineFingerprints: readonly string[];
+  readonly distinctiveLineFingerprints: readonly string[];
+  readonly lineCount: number;
+  readonly truncated: boolean;
+}
+
 export type AgentPatchMatchSide = "added" | "deleted" | "content";
 
 export interface AgentPatchChange {
@@ -142,6 +154,7 @@ export interface AgentPatchChange {
   readonly matchSide: AgentPatchMatchSide;
   readonly hunkRanges: readonly AgentPatchHunkRange[];
   readonly lineCount: number;
+  readonly worktreeHunks?: readonly AgentPatchHunkEvidence[];
   readonly movedFrom?: string | undefined;
 }
 

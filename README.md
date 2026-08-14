@@ -14,18 +14,18 @@ The report keeps observed facts, deterministic derivations, and conservative inf
 
 ## Installation
 
-The intended v0.1.0 installation is through npm:
+The intended v0.1.1 installation is through npm:
 
 ```sh
-npm install --global whyline
+npm install --global @benflex/whyline
 ```
 
-Whyline requires Node.js 24 or newer and Git 2.36 or newer. v0.1.0 supports Linux and macOS. Windows is explicitly unsupported and untested for this release.
+Whyline requires Node.js 24 or newer and Git 2.36 or newer. v0.1.1 supports Linux and macOS. Windows is explicitly unsupported and untested for this release.
 
 For a one-shot invocation without a global install:
 
 ```sh
-npx --yes whyline src/parser.ts:42
+npx --yes @benflex/whyline src/parser.ts:42
 ```
 
 ## Usage
@@ -65,7 +65,7 @@ An ambiguous, unavailable, limited, or missing evidence domain does not invalida
 
 ## Deliberate limits
 
-Whyline v0.1.0 does not claim authorship, causation, or semantic symbol identity across history. It does not search the web or a remote repository, fetch Git data, execute commands found in Codex transcripts, expose prompts or reasoning, maintain a persistent index, provide a web UI or daemon, or support Windows. A dirty or untracked line is not treated as Git-committed authorship; when current worktree material is sufficient, Whyline can correlate that change with local Codex history without claiming that an agent authored or caused it.
+Whyline v0.1.1 does not claim authorship, causation, or semantic symbol identity across history. It does not search the web or a remote repository, fetch Git data, execute commands found in Codex transcripts, expose prompts or reasoning, maintain a persistent index, provide a web UI or daemon, or support Windows. A dirty or untracked line is not treated as Git-committed authorship; when current worktree material is sufficient, Whyline can correlate that change with local Codex history without claiming that an agent authored or caused it.
 
 Codex correlation is local and optional. It depends on readable, supported local session history; disabled, deleted, rotated, inaccessible, truncated, or unsupported history remains unavailable or limited rather than guessed.
 

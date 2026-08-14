@@ -31,8 +31,8 @@ async function readPackageManifest(): Promise<PackageManifest> {
 test("package manifest exposes the approved public release metadata", async () => {
   const manifest = await readPackageManifest();
 
-  assert.equal(manifest.name, "whyline");
-  assert.equal(manifest.version, "0.1.0");
+  assert.equal(manifest.name, "@benflex/whyline");
+  assert.equal(manifest.version, "0.1.1");
   assert.equal(manifest.private, undefined);
   assert.match(manifest.description ?? "", /why does this line exist/i);
   assert.equal(manifest.license, "MIT");

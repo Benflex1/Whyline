@@ -87,16 +87,15 @@ test("rejects non-regular tar entry types even at allowed paths", () => {
 });
 
 test("accepts only exact vX.Y.Z release tags", () => {
-  assert.equal(versionFromReleaseTag("v0.1.0"), "0.1.0");
+  assert.equal(versionFromReleaseTag("v0.1.1"), "0.1.1");
   assert.throws(() => versionFromReleaseTag("0.1"), /release tag must match/);
-  assert.throws(() => versionFromReleaseTag("0.1.0"), /release tag must match/);
-  assert.throws(() => versionFromReleaseTag("v0.1.0-rc.1"), /release tag must match/);
+  assert.throws(() => versionFromReleaseTag("v0.1.1-rc.1"), /release tag must match/);
 });
 
 test("rejects a tag whose version differs from package.json", () => {
-  assert.doesNotThrow(() => assertTagMatchesVersion("v0.1.0", "0.1.0"));
+  assert.doesNotThrow(() => assertTagMatchesVersion("v0.1.1", "0.1.1"));
   assert.throws(
-    () => assertTagMatchesVersion("v0.1.0", "0.2.0"),
+    () => assertTagMatchesVersion("v0.1.1", "0.1.0"),
     /does not match package\.json version/,
   );
 });

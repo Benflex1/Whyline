@@ -14,7 +14,9 @@ The separate compatibility job builds Git `2.36.6` from upstream commit `ecaa3db
 
 Before M3, configure a GitHub Actions environment named `release` with required reviewers and tag restrictions. For the first public publication, add a granular npm publication token with the required 2FA bypass as the environment secret `NPM_TOKEN`. The workflow fails before `npm publish` if neither that secret nor the trusted-publisher mode variable is configured.
 
-After `whyline@0.1.0` exists, npm trusted publishing can replace the bootstrap token. Configure the npm trusted publisher for `Benflex1/Whyline`, workflow filename `release.yml`, and environment `release`, then set the environment variable `NPM_TRUSTED_PUBLISHER=true` and remove `NPM_TOKEN` when ready. The release job already grants only that job `id-token: write` and publishes with `--provenance`; normal CI has no token or OIDC permission.
+The public npm package is scoped as `@benflex/whyline`.
+
+After `@benflex/whyline@0.1.1` exists, npm trusted publishing can replace the bootstrap token. Configure the npm trusted publisher for `Benflex1/Whyline`, workflow filename `release.yml`, and environment `release`, then set the environment variable `NPM_TRUSTED_PUBLISHER=true` and remove `NPM_TOKEN` when ready. The release job already grants only that job `id-token: write` and publishes with `--provenance`; normal CI has no token or OIDC permission.
 
 If npm publication succeeds but GitHub Release creation fails, do not rerun the publishing path: an npm name/version is immutable. Dispatch `release.yml` with the same existing tag and `release_only=true`; that mode retests the exact tag and package, skips npm publication, and runs a separate GitHub-Release-only job with `contents: write` but no OIDC permission. Use `gh release edit` if the release already exists and only its notes need correction.
 

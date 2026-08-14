@@ -62,7 +62,7 @@ test("compiled CLI reads its packaged version from an unrelated working director
 
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.equal(result.stdout, "0.1.0\n");
+  assert.equal(result.stdout, "0.1.1\n");
 });
 
 test("CLI runs when Node is given npm's symlinked bin path", async (t) => {

@@ -1,6 +1,6 @@
 {
-  "name": "whyline",
-  "version": "0.1.0",
+  "name": "@benflex/whyline",
+  "version": "0.1.1",
   "description": "Answer \"Why does this line exist?\" with conservative Git and local Codex evidence.",
   "license": "MIT",
   "author": "Benflex1",
